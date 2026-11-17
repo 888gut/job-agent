@@ -162,6 +162,54 @@ def _chrome_exe() -> str | None:
 _manual: dict = {"proc": None}  # the normal (non-automated) sign-in Chrome, if open
 
 
+def _forget_window_position() -> None:
+    """Drop Chrome's saved window placement for the agent profile (it's off-screen)."""
+    import json
+
+    prefs = BROWSER_PROFILE / "Default" / "Preferences"
+    try:
+        data = json.loads(prefs.read_text(encoding="utf-8"))
+        if data.get("browser", {}).pop("window_placement", None) is not None:
+            prefs.write_text(json.dumps(data), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _show_on_main_screen(pid: int, wait: float = 10.0) -> None:
+    """Find the window Chrome opened for `pid`, move it onto the main screen, maximize it and
+    bring it to the front (Windows only)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            found = []
+
+            @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            def cb(hwnd, _):
+                owner = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                if owner.value == pid and user32.IsWindowVisible(hwnd) and user32.GetWindowTextLengthW(hwnd):
+                    found.append(hwnd)
+                return True
+
+            user32.EnumWindows(cb, 0)
+            if found:
+                hwnd = found[0]
+                user32.ShowWindow(hwnd, 9)                                    # restore
+                user32.SetWindowPos(hwnd, 0, 60, 40, 1280, 900, 0x0040)       # onto the main screen
+                user32.ShowWindow(hwnd, 3)                                    # maximize
+                user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0043)             # front...
+                user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0043)             # ...but not always-on-top
+                user32.SetForegroundWindow(hwnd)
+                return
+            time.sleep(0.4)
+    except Exception:
+        pass
+
+
 # ---------------- public operations (call through run()) ----------------
 def open_login() -> str:
     """Open Handshake's sign-in in a NORMAL Chrome window (no automation attached) on the agent's
@@ -173,12 +221,14 @@ def open_login() -> str:
     exe = _chrome_exe()
     if not exe:
         raise RuntimeError("Google Chrome wasn't found on this PC.")
+    # Chrome remembers the last window position per profile, and the agent's background window
+    # lives off-screen, so forget that position and then put this window on your main screen.
+    _forget_window_position()
     _manual["proc"] = subprocess.Popen([
         exe, f"--user-data-dir={BROWSER_PROFILE}", "--no-first-run", "--no-default-browser-check",
-        "--new-window", f"{HANDSHAKE_BASE}/login",
+        "--start-maximized", "--new-window", f"{HANDSHAKE_BASE}/login",
     ])
-    time.sleep(3)
-    _raise_window()
+    _show_on_main_screen(_manual["proc"].pid)
     return "Sign in to Handshake in the Chrome window that opened, then close that window."
 
 
