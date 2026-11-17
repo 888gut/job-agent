@@ -60,8 +60,13 @@ async def lifespan(_app: FastAPI):
     scheduler.add_job(_gmail_tick, "interval", minutes=30, id="gmail", coalesce=True)
     scheduler.add_job(pipeline.cleanup_handshake_docs, "interval", hours=24, id="hs_docs", coalesce=True,
                       next_run_time=datetime.now() + timedelta(minutes=10))
+    # Keep the agent's Handshake browser running out of sight for the dashboard's Handshake tab,
+    # unless you closed it there last time.
+    handshake.set_keep(not get_settings().get("hs_browser_closed"))
+    handshake.start_keeper()
     yield
     scheduler.shutdown(wait=False)
+    handshake.set_keep(False)
     handshake.run(handshake.close)
 
 
@@ -658,6 +663,15 @@ async def handshake_login():
     # agent's own window, so never do it in the middle of a search or an application run.
     if pipeline.batch["running"] or pipeline.state["running"]:
         return {"ok": False, "message": "The agent is busy using Handshake right now. Sign in after it finishes (or click Stop)."}
+    _keep_browser(True)
+    if not handshake.login_open():  # maybe the saved session still works: check before asking you
+        try:
+            ok = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.is_logged_in)), timeout=90)
+        except Exception:
+            ok = False
+        if ok:
+            pipeline.record_handshake_login(True)
+            return {"ok": True, "logged_in": True, "message": "You're already signed in to Handshake."}
     try:
         await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.open_login)), timeout=90)
         email = get_settings().get("gmail_email") or ""
@@ -692,6 +706,38 @@ async def handshake_popout():
 
 
 # ---------- Handshake tab: live view of the agent's browser ----------
+def _keep_browser(keep: bool) -> None:
+    handshake.set_keep(keep)
+    save_settings({"hs_browser_closed": not keep})
+
+
+@app.post("/api/handshake/open")
+async def handshake_open():
+    """Start the agent's browser (out of sight) and show Handshake in the dashboard's tab."""
+    if handshake.login_open():
+        return {"ok": True, "message": "The sign-in window is open."}
+    _keep_browser(True)
+    try:
+        url = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.ensure_open)), timeout=90)
+    except Exception as e:
+        return {"ok": False, "message": f"Couldn't open the Handshake browser: {e}"}
+    return {"ok": True, "url": url, "message": "The Handshake browser is running."}
+
+
+@app.post("/api/handshake/close")
+async def handshake_close():
+    """Really close the agent's browser. It stays closed until you open it or sign in again."""
+    if (busy := _agent_busy()):
+        return {"ok": False, "message": f"The agent is using the browser ({busy}). Click Stop first."}
+    if handshake.login_open():
+        await asyncio.to_thread(handshake.finish_login)
+    _keep_browser(False)
+    await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.shutdown)), timeout=60)
+    # A closed browser can't vouch for the sign-in (Handshake's session may not outlive it).
+    save_settings({"hs_logged_in": None})
+    return {"ok": True, "message": "Closed the Handshake browser."}
+
+
 def _agent_busy() -> str:
     if pipeline.batch["running"]:
         return f"Applying: {pipeline.batch.get('current') or 'starting'}"
@@ -704,8 +750,17 @@ def _agent_busy() -> str:
 async def live_status():
     info = await asyncio.to_thread(live.status)
     busy = _agent_busy()
-    return {**info, "signin_open": handshake.login_open(), "busy": busy, "can_control": bool(info["open"]) and not busy,
-            "logged_in": get_settings().get("hs_logged_in")}
+    signin = handshake.login_open()
+    stored = get_settings().get("hs_logged_in")
+    logged_in = None
+    if info["open"]:
+        # Read the sign-in from the page itself: the tab you're looking at first, then any other.
+        urls = [info.get("url", "")] + [t["url"] for t in info.get("tabs", [])]
+        logged_in = next((v for v in map(handshake.signed_in_from_url, urls) if v is not None), None)
+        if logged_in is not None and logged_in != stored and not (signin and not logged_in):
+            pipeline.record_handshake_login(logged_in)
+    return {**info, "signin_open": signin, "busy": busy, "can_control": bool(info["open"]) and not busy,
+            "logged_in": logged_in, "closed": not info["open"] and not handshake.keeping() and not signin}
 
 
 @app.get("/api/live/frame")
@@ -752,7 +807,7 @@ async def live_input(request: Request):
 async def handshake_status():
     """Confirm the Handshake sign-in with the agent's own browser. While the agent is busy or the
     sign-in window is open, answer with the last confirmed result instead of interrupting."""
-    if _agent_busy() or handshake.login_open():
+    if _agent_busy() or handshake.login_open() or not handshake.keeping():
         return {**_hs_login_info(), "checked": False}
     try:
         ok = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.is_logged_in)), timeout=90)

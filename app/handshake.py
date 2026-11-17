@@ -27,7 +27,9 @@ VIEW_FLAGS = [f"--remote-debugging-port={DEBUG_PORT}", "--remote-debugging-addre
               "--window-position=-32000,-32000", "--window-size=1280,900",
               "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
               "--disable-background-timer-throttling", "--disable-features=CalculateNativeWinOcclusion"]
-_state: dict = {"pw": None, "ctx": None}
+# keep: the dashboard wants the agent's browser running in the background. The keeper thread
+# (start_keeper) reopens it if it closes by itself, and stops when you close it from the dashboard.
+_state: dict = {"pw": None, "ctx": None, "keep": True}
 
 JOB_ID_RX = re.compile(r"/(?:job-search|jobs|postings)/(\d{4,})")
 BLOCKER_RX = re.compile(r"verify you are (a )?human|are you a robot|unusual traffic|captcha", re.I)
@@ -69,15 +71,30 @@ def _context():
     if ctx is not None:
         try:
             _ = ctx.pages  # raises if the browser was closed
-            return ctx
+            # Playwright only notices a browser that died (window closed, process killed) during
+            # a call, so also check that its DevTools port still answers.
+            if _browser_ws():
+                return ctx
+            try:
+                ctx.close()
+            except Exception:
+                pass
         except Exception:
-            _state["ctx"] = None
+            pass
+        _state["ctx"] = None
     from playwright.sync_api import sync_playwright
 
     if _state["pw"] is None:
         _state["pw"] = sync_playwright().start()
     # Use the installed, signed Chrome (or Edge): Windows can block Playwright's own browser
     # download. The agent always uses its own separate profile, never your everyday one.
+    # Chrome reopens a profile where its window last was. After a Pop out that's maximized on your
+    # screen, which would put the agent's window on your desktop, so forget it before every launch.
+    # A Chrome left over from an earlier server (stopped without closing it) still holds the
+    # profile and would block the launch: close it first, the way closing its window would.
+    if _browser_ws():
+        _quit_any_browser()
+    _forget_window_position()
     errors = []
     for channel in ("chrome", "msedge", None):
         try:
@@ -87,8 +104,9 @@ def _context():
                 str(BROWSER_PROFILE), channel=channel, headless=False, viewport={"width": 1280, "height": 900},
                 args=VIEW_FLAGS,
             )
-            ctx.on("close", lambda *_: _state.update(ctx=None))  # you closed the window -> reopen next time
+            ctx.on("close", lambda *_: _state.update(ctx=None))  # closed -> the keeper reopens it
             _state["ctx"] = ctx
+            _state["keep"] = True
             return ctx
         except Exception as e:
             errors.append(f"{channel or 'bundled'}: {str(e).splitlines()[0][:120]}")
@@ -197,7 +215,8 @@ def _chrome_exe() -> str | None:
     return None
 
 
-_manual: dict = {"proc": None}  # the normal (non-automated) sign-in Chrome, if open
+_manual: dict = {"proc": None, "popped": False}  # the normal (non-automated) sign-in Chrome, if open
+WS_EX_TOOLWINDOW, WS_EX_APPWINDOW = 0x80, 0x40000
 
 
 def _forget_window_position() -> None:
@@ -268,6 +287,10 @@ def _show_on_main_screen(pid: int, wait: float = 10.0) -> None:
             user32.EnumWindows(cb, 0)
             if found:
                 hwnd = found[0]
+                ex = user32.GetWindowLongW(hwnd, -20)
+                if ex & WS_EX_TOOLWINDOW:  # give it back its taskbar button while it's on screen
+                    user32.ShowWindow(hwnd, 0)
+                    user32.SetWindowLongW(hwnd, -20, (ex & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW)
                 user32.ShowWindow(hwnd, 9)                                    # restore
                 user32.SetWindowPos(hwnd, 0, 60, 40, 1280, 900, 0x0040)       # onto the main screen
                 user32.ShowWindow(hwnd, 3)                                    # maximize
@@ -310,6 +333,7 @@ def open_login() -> str:
     # lives off-screen, so forget that position and then put this window on your main screen.
     _forget_window_position()
     _label_profile()
+    _manual["popped"] = False
     _manual["proc"] = subprocess.Popen([
         exe, f"--user-data-dir={BROWSER_PROFILE}", "--no-first-run", "--no-default-browser-check",
         *VIEW_FLAGS, "--new-window", f"{HANDSHAKE_BASE}/login",
@@ -372,6 +396,7 @@ def finish_login() -> str:
         except Exception:
             proc.terminate()
     _manual["proc"] = None
+    _manual["popped"] = False
     return "Signed-in session saved. The agent can use Handshake again."
 
 
@@ -381,6 +406,7 @@ def pop_out() -> str:
     proc = _manual.get("proc")
     if proc is None or proc.poll() is not None:
         return "The sign-in window isn't open."
+    _manual["popped"] = True  # the keeper leaves it on your screen until you're done
     _show_on_main_screen(proc.pid)
     return "The sign-in window is on your screen now. Click Done signing in here when you're finished."
 
@@ -821,3 +847,136 @@ def close() -> None:
             _state["pw"].stop()
     finally:
         _state["ctx"] = _state["pw"] = None
+
+
+# ---------------- background session (the dashboard's Handshake tab) ----------------
+def ensure_open() -> str:
+    """Start the agent's browser if it isn't running and make sure it shows Handshake."""
+    page = _page()
+    if page.url in ("", "about:blank"):
+        page.goto(f"{HANDSHAKE_BASE}/job-search", wait_until="domcontentloaded")
+    return page.url
+
+
+def shutdown() -> None:
+    """You closed the browser from the dashboard: really close it, and don't reopen it."""
+    _state["keep"] = False
+    close()
+
+
+def set_keep(keep: bool) -> None:
+    _state["keep"] = bool(keep)
+
+
+def keeping() -> bool:
+    return bool(_state["keep"])
+
+
+_SIGNED_OUT_RX = re.compile(r"^/(login|logout|access|sso|auth|sign_?in|users/sign_in|saml)\b", re.I)
+
+
+def signed_in_from_url(url: str) -> bool | None:
+    """True on a Handshake app page, False on its sign-in pages or a single-sign-on step, None
+    when the page doesn't tell (an employer's site, a blank tab)."""
+    from urllib.parse import urlparse
+
+    u = urlparse(url or "")
+    host = (u.hostname or "").lower()
+    if host == "accounts.google.com" or "sso" in host:
+        return False
+    if not host.endswith("joinhandshake.com"):
+        return None
+    if _SIGNED_OUT_RX.search(u.path or "/"):
+        return False
+    return True if host.startswith("app.") else None
+
+
+_tuck_cache: dict = {"ws": None, "pid": None}
+
+
+def _browser_pid(ws_url: str) -> int | None:
+    """Process id of the Chrome that owns the DevTools port (cached per browser launch)."""
+    import json
+
+    if _tuck_cache["ws"] == ws_url:
+        return _tuck_cache["pid"]
+    from websockets.sync.client import connect
+
+    with connect(ws_url, open_timeout=3) as ws:
+        ws.send(json.dumps({"id": 1, "method": "SystemInfo.getProcessInfo"}))
+        while True:
+            reply = json.loads(ws.recv(timeout=5))
+            if reply.get("id") == 1:
+                break
+    pid = next((p["id"] for p in reply.get("result", {}).get("processInfo", []) if p.get("type") == "browser"), None)
+    _tuck_cache.update(ws=ws_url, pid=pid)
+    return pid
+
+
+def _tuck_windows(pid: int) -> int:
+    """Keep every window of the agent's Chrome off your desktop: off-screen, not minimized (so it
+    keeps drawing for the live view) and without a taskbar button. Returns how many it moved."""
+    import ctypes
+    from ctypes import wintypes
+
+    class WINDOWPLACEMENT(ctypes.Structure):
+        _fields_ = [("length", wintypes.UINT), ("flags", wintypes.UINT), ("showCmd", wintypes.UINT),
+                    ("ptMinPosition", wintypes.POINT), ("ptMaxPosition", wintypes.POINT),
+                    ("rcNormalPosition", wintypes.RECT)]
+
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def cb(hwnd, _):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd) and user32.GetWindowTextLengthW(hwnd):
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(cb, 0)
+    moved = 0
+    for hwnd in found:
+        ex = user32.GetWindowLongW(hwnd, -20)
+        want = (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+        pl = WINDOWPLACEMENT()
+        pl.length = ctypes.sizeof(WINDOWPLACEMENT)
+        user32.GetWindowPlacement(hwnd, ctypes.byref(pl))
+        hidden_away = pl.showCmd in (1, 4) and pl.rcNormalPosition.left <= -20000
+        if ex == want and hidden_away:
+            continue
+        if ex != want:  # the taskbar only drops the button when the window is shown again
+            user32.ShowWindow(hwnd, 0)
+            user32.SetWindowLongW(hwnd, -20, want)
+        pl.flags, pl.showCmd = 0, 4                     # SW_SHOWNOACTIVATE: restored, not focused
+        pl.rcNormalPosition = wintypes.RECT(-32000, -32000, -32000 + 1280, -32000 + 900)
+        user32.SetWindowPlacement(hwnd, ctypes.byref(pl))
+        moved += 1
+    return moved
+
+
+def _keeper() -> None:
+    last_try = 0.0
+    while True:
+        time.sleep(0.5)
+        try:
+            ws_url = _browser_ws()
+            if ws_url:
+                if not _manual.get("popped"):
+                    pid = _browser_pid(ws_url)
+                    if pid:
+                        _tuck_windows(pid)
+            elif _state["keep"] and not login_open() and time.time() - last_try > 15:
+                last_try = time.time()   # closed by itself (or by you on the desktop): reopen it
+                run(ensure_open)
+        except Exception:
+            pass
+
+
+def start_keeper() -> None:
+    import threading
+
+    if not _state.get("keeper"):
+        _state["keeper"] = threading.Thread(target=_keeper, name="handshake-keeper", daemon=True)
+        _state["keeper"].start()

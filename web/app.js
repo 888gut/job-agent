@@ -758,10 +758,13 @@ function liveFlushText() { clearTimeout(live.textTimer); if (live.text) { const 
 const LIVE_KEYS = new Set(["Enter", "Backspace", "Tab", "Escape", "Delete", "Home", "End", "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "PageUp", "PageDown"]);
 
 function liveStateLine(s) {
-  if (!s.open) return `<span class="hs-dot off"></span>No Handshake browser is open. The agent opens one when it searches or applies.`;
+  if (!s.open && s.signin_open) return `<span class="hs-dot busy"></span><b>Sign-in window</b> · starting…`;
+  if (!s.open && s.closed) return `<span class="hs-dot off"></span><b>Closed</b> · the agent's browser is closed and not signed in. Click Open Handshake or Sign in to Handshake to start it again.`;
+  if (!s.open) return `<span class="hs-dot busy"></span><b>Starting</b> · opening the agent's browser out of sight…`;
   if (s.signin_open) return `<span class="hs-dot on"></span><b>Sign-in window</b> · click the page and sign in as usual, then click Done signing in.`;
   if (s.busy) return `<span class="hs-dot busy"></span><b>Agent at work</b> · ${esc(s.busy)}. You can watch; clicks are paused until it finishes.`;
-  return `<span class="hs-dot on"></span><b>Agent's browser</b> · idle. You can click around if you need to.`;
+  const who = s.logged_in === true ? "signed in" : s.logged_in === false ? "signed out" : "sign-in not confirmed";
+  return `<span class="hs-dot on"></span><b>Agent's browser</b> · idle, ${who}. It runs in the background; you can click around here if you need to.`;
 }
 
 function liveChrome(s) {
@@ -774,13 +777,21 @@ function liveChrome(s) {
   $("#hsUrl").textContent = url; $("#hsUrl").title = url;
   $("#hsTabs").innerHTML = (s.tabs || []).length > 1 ? s.tabs.map((t) =>
     `<button class="hs-tab${t.id === s.current ? " on" : ""}" data-tab="${esc(t.id)}" title="${esc(t.url)}">${esc((t.title || t.url).slice(0, 40))}</button>`).join("") : "";
-  $("#hsSignIn").hidden = !!s.signin_open || s.logged_in === true;
-  $("#hsBadge").hidden = !!s.signin_open || s.logged_in !== true;
+  // "Signed in" only while the browser is open and its page says so; anything else offers Sign in.
+  const signedIn = !!s.open && !s.signin_open && s.logged_in === true;
+  $("#hsSignIn").hidden = !!s.signin_open || signedIn;
+  $("#hsBadge").hidden = !signedIn;
+  $("#hsOut").hidden = !!s.signin_open || signedIn;
+  $("#hsOut").textContent = s.open ? (s.logged_in === false ? "Signed out" : "Not confirmed") : s.closed ? "Closed" : "Starting…";
   $("#hsDone").hidden = $("#hsPop").hidden = !s.signin_open;
-  $("#hsSignIn").disabled = !!s.busy;
+  $("#hsOpen").hidden = !!s.open || !!s.signin_open || !s.closed;
+  $("#hsClose").hidden = !s.open && !s.signin_open;
+  $("#hsSignIn").disabled = $("#hsClose").disabled = !!s.busy;
   $("#hsBack").disabled = $("#hsReload").disabled = !s.can_control;
   $("#hsScreen").classList.toggle("view-only", !s.can_control);
   $("#hsEmpty").hidden = !!s.open;
+  $("#hsEmptyBig").textContent = s.closed ? "Handshake browser closed" : "Starting the Handshake browser…";
+  $("#hsEmptyText").innerHTML = s.closed ? "Click <b>Open Handshake</b> to start it again, or <b>Sign in to Handshake</b>." : "It runs out of sight; the page shows up here in a moment.";
   $("#hsImg").hidden = !s.open;
 }
 
@@ -843,15 +854,18 @@ render.handshake = async () => {
         <button class="btn small" id="hsBack" title="Back">&#8592; Back</button>
         <button class="btn small" id="hsReload" title="Reload">Reload</button>
         <div class="hs-url" id="hsUrl"></div>
-        <span class="hs-confirmed" id="hsBadge" hidden title="Confirmed with the agent's browser">Signed in</span>
+        <span class="hs-confirmed" id="hsBadge" hidden title="Read from the page the agent's browser is on">Signed in</span>
+        <span class="hs-out" id="hsOut" hidden></span>
+        <button class="btn small" id="hsOpen" hidden title="Start the agent's browser again (it runs out of sight)">Open Handshake</button>
         <button class="btn small primary" id="hsSignIn">Sign in to Handshake</button>
         <button class="btn small green" id="hsDone" hidden>Done signing in</button>
         <button class="btn small" id="hsPop" hidden title="Bring the sign-in window onto your screen (for a passkey or file prompt)">Pop out</button>
+        <button class="btn small" id="hsClose" hidden title="Close the agent's browser for real. Handshake may sign you out.">Close</button>
       </div>
       <div class="hs-tabs" id="hsTabs"></div>
       <div class="hs-screen" id="hsScreen" tabindex="0" aria-label="Live Handshake browser. Click to focus, then type.">
         <img id="hsImg" alt="Live view of the Handshake browser" draggable="false">
-        <div class="hs-empty" id="hsEmpty"><div class="big">Nothing open right now</div>Click <b>Sign in to Handshake</b> to sign in, or start a search and watch it here.</div>
+        <div class="hs-empty" id="hsEmpty"><div class="big" id="hsEmptyBig">Nothing open right now</div><span id="hsEmptyText">Click <b>Sign in to Handshake</b> to sign in, or start a search and watch it here.</span></div>
       </div>
       <div class="hs-foot" id="hsLine"></div>
     </div>
@@ -872,8 +886,20 @@ render.handshake = async () => {
   const signIn = (btn) => withBusy(btn, "Opening…", async () => {
     live.done = null; $("#hsNext").hidden = true;
     const r = await post("/api/handshake/login"); toast(r.message, r.ok);
+    if (r.logged_in) { showNext(r); refreshChrome(); }
     liveChrome(await api("/api/live/status")); $("#hsScreen").focus();
   });
+  $("#hsOpen").addEventListener("click", (e) => withBusy(e.currentTarget, "Opening…", async () => {
+    const r = await post("/api/handshake/open"); if (!r.ok) toast(r.message, false);
+    liveChrome(await api("/api/live/status")); $("#hsScreen").focus();
+  }));
+  $("#hsClose").addEventListener("click", (e) => withBusy(e.currentTarget, "Closing…", async () => {
+    const r = await post("/api/handshake/close"); toast(r.message, r.ok);
+    live.done = null; $("#hsNext").hidden = true;
+    liveChrome(await api("/api/live/status")); refreshChrome();
+  }));
+  // Not running and you didn't close it: start it now rather than waiting for the background check.
+  if (!s.open && !s.closed && !s.signin_open && !s.busy) post("/api/handshake/open").catch(() => {});
   $("#hsSignIn").addEventListener("click", (e) => signIn(e.currentTarget));
   $("#hsDone").addEventListener("click", (e) => withBusy(e.currentTarget, "Checking sign-in…", async () => {
     const r = await post("/api/handshake/login/done"); showNext(r); refreshChrome();
@@ -906,7 +932,22 @@ render.handshake = async () => {
   });
 
   liveRun(++live.loop);
+  focusHandshake();
 };
+
+// The Handshake nav link and toolbar button: open the tab, or if it's already open, bring the live
+// view into view and give it the keyboard.
+function focusHandshake() {
+  if (currentPage !== "handshake") { location.hash = "#/handshake"; return; }
+  const screen = $("#hsScreen");
+  if (!screen) return;
+  screen.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  screen.focus({ preventScroll: true });
+}
+$("#hsTopBtn")?.addEventListener("click", focusHandshake);
+document.querySelector('a[data-page="handshake"]')?.addEventListener("click", (e) => {
+  if (currentPage === "handshake") { e.preventDefault(); focusHandshake(); }
+});
 
 render.activity = async () => {
   const rows = await api("/api/log?limit=300");

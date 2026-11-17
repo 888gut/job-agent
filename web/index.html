@@ -19,6 +19,7 @@
       <linearGradient id="gPurple" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e2c4fb"/><stop offset="1" stop-color="#7b48a8"/></linearGradient>
     </defs>
     <symbol id="i-briefcase" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2.5" fill="url(#gBlue)" stroke="#1a4f8c"/><path d="M8.5 7V5.2A1.7 1.7 0 0 1 10.2 3.5h3.6a1.7 1.7 0 0 1 1.7 1.7V7" fill="none" stroke="#1a4f8c" stroke-width="1.6"/><rect x="2" y="7" width="20" height="6" rx="2.5" fill="#fff" opacity=".28"/></symbol>
+    <symbol id="i-handshake" viewBox="0 0 165 165"><defs><linearGradient id="gHsBg" x1="125" y1="-3" x2="96" y2="190" gradientUnits="userSpaceOnUse"><stop stop-color="#DDFF55"/><stop offset=".87" stop-color="#C7F542"/><stop offset="1" stop-color="#D3FB52"/></linearGradient><linearGradient id="gHsMark" x1="115" y1="41" x2="39" y2="101" gradientUnits="userSpaceOnUse"><stop stop-color="#052326"/><stop offset="1" stop-color="#073D42"/></linearGradient></defs><rect width="165" height="165" rx="35.6" fill="url(#gHsBg)"/><path d="M99.6 33.2 93 70.9 73.5 86.8l9.4-53.6H64L46.5 132.2h18.9l4.9-27.4 19.5-16.1-7.7 43.5H101l17.5-99z" fill="url(#gHsMark)"/></symbol>
     <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5" fill="url(#gBlue)" stroke="#1a4f8c"/><path d="M2.5 12h19M12 2.5c2.8 2.6 4.2 5.8 4.2 9.5s-1.4 6.9-4.2 9.5c-2.8-2.6-4.2-5.8-4.2-9.5s1.4-6.9 4.2-9.5z" fill="none" stroke="#fff" stroke-width="1.3" opacity=".9"/></symbol>
     <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5V21H3z" fill="url(#gBlue)" stroke="#1a4f8c" stroke-linejoin="round"/><rect x="9.5" y="14" width="5" height="7" fill="#fff" opacity=".8"/></symbol>
     <symbol id="i-queue" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2.5" fill="url(#gAmber)" stroke="#9a6406"/><path d="m7 12.5 3 3 7-7" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
@@ -61,7 +62,7 @@
         <button id="runBtn"><svg class="icon" style="width:16px;height:16px" aria-hidden="true"><use href="#i-play"/></svg><span class="lg">Run search now</span><span class="sm">Search</span></button>
         <button class="hide-phone" onclick="location.hash='#/queue'">Review queue</button>
         <button id="gmailBtn" class="gmail-btn" title="Open your Handshake Gmail in a new tab"><svg class="icon" style="width:16px;height:16px" aria-hidden="true" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="2" fill="#fff" stroke="#b3261e"/><path d="m3.5 6.5 8.5 6.5 8.5-6.5" fill="none" stroke="#d93025" stroke-width="2" stroke-linejoin="round"/></svg><span class="lg">Open Gmail</span><span class="sm">Gmail</span><span class="badge" id="gmailBadge" hidden></span></button>
-        <button id="hsTopBtn" class="hs-top" onclick="location.hash='#/handshake'" title="Watch the agent's Handshake browser and sign in"><svg class="icon" style="width:16px;height:16px" aria-hidden="true"><use href="#i-globe"/></svg><span class="lg">Handshake</span><span class="sm">Handshake</span><span class="hs-top-dot" id="hsTopDot" hidden></span></button>
+        <button id="hsTopBtn" class="hs-top" title="Show the agent's Handshake browser"><svg class="icon" style="width:16px;height:16px" aria-hidden="true"><use href="#i-handshake"/></svg><span class="lg">Handshake</span><span class="sm">Handshake</span><span class="hs-top-dot" id="hsTopDot" hidden></span></button>
         <button id="sheetBtn" style="display:none">Open Google Sheet</button>
         <div class="spacer"></div>
         <span class="status-text" id="runStatus" aria-live="polite"></span>
@@ -83,7 +84,7 @@
           <a href="#/github" data-page="github"><svg class="icon"><use href="#i-code"/></svg><span class="lg">GitHub</span><span class="sm">GitHub</span></a>
           <div class="divider"></div>
           <h4>Agent</h4>
-          <a href="#/handshake" data-page="handshake"><svg class="icon"><use href="#i-globe"/></svg><span class="lg">Handshake</span><span class="sm">Handshake</span></a>
+          <a href="#/handshake" data-page="handshake"><svg class="icon" aria-hidden="true"><use href="#i-handshake"/></svg><span class="lg">Handshake</span><span class="sm">Handshake</span></a>
           <a href="#/settings" data-page="settings"><svg class="icon"><use href="#i-gear"/></svg><span class="lg">Settings</span><span class="sm">Settings</span></a>
           <a href="#/activity" data-page="activity"><svg class="icon"><use href="#i-pulse"/></svg><span class="lg">Activity Log</span><span class="sm">Activity</span></a>
         </nav>
