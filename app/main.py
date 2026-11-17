@@ -57,7 +57,44 @@ async def lifespan(_app: FastAPI):
     handshake.run(handshake.close)
 
 
-app = FastAPI(title="Job Agent", lifespan=lifespan)
+app = FastAPI(title="Job Agent", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+
+# ---------------- local-only protection ----------------
+# The dashboard holds personal data and can act on your accounts, so only this PC's own
+# dashboard page may talk to it:
+#  - Host must be localhost/127.0.0.1 (blocks DNS-rebinding: a website pointing its own
+#    domain at 127.0.0.1 to read your data through your browser).
+#  - Anything that changes state must not come from another website (blocks cross-site
+#    requests that would start searches, applications, uploads, etc.).
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _hostname(value: str) -> str:
+    value = value.strip().lower()
+    if value.startswith("["):
+        return value.split("]")[0] + "]"
+    return value.split(":")[0]
+
+
+@app.middleware("http")
+async def local_only(request, call_next):
+    from fastapi.responses import JSONResponse
+    from urllib.parse import urlsplit
+
+    if _hostname(request.headers.get("host", "")) not in LOCAL_HOSTS:
+        return JSONResponse({"detail": "This dashboard only answers on 127.0.0.1."}, status_code=403)
+    if request.method not in SAFE_METHODS:
+        origin = request.headers.get("origin")
+        if origin and (urlsplit(origin).hostname or "") not in {h.strip("[]") for h in LOCAL_HOSTS}:
+            return JSONResponse({"detail": "Requests from other websites are not allowed."}, status_code=403)
+        if request.headers.get("sec-fetch-site") == "cross-site":
+            return JSONResponse({"detail": "Requests from other websites are not allowed."}, status_code=403)
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"            # can't be embedded in another site
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 # ---------------- serializers ----------------

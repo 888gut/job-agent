@@ -501,6 +501,22 @@ def test_apply_batch_runs_in_order_and_stops_at_daily_cap(monkeypatch):
     assert len(calls) == 1                                    # Stop takes effect after the current job
 
 
+def test_dashboard_only_answers_local_requests():
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    c = TestClient(app, base_url="http://127.0.0.1:8765")
+    assert c.get("/api/settings").status_code == 200                                   # own page: fine
+    assert c.get("/api/settings", headers={"Host": "attacker.example"}).status_code == 403   # DNS rebinding
+    assert c.post("/api/apply-batch/stop", headers={"Origin": "https://attacker.example"}).status_code == 403
+    assert c.post("/api/apply-batch/stop", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+    assert c.post("/api/apply-batch/stop", headers={"Origin": "http://127.0.0.1:8765"}).status_code == 200
+    r = c.get("/api/settings")
+    assert r.headers["x-frame-options"] == "DENY"
+    assert c.get("/docs").status_code in (403, 404) and c.get("/openapi.json").status_code == 404
+
+
 def test_settings_roundtrip():
     from app.db import get_settings, init_db, save_settings
 
