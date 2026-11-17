@@ -925,7 +925,7 @@ def test_search_reads_in_browser_thread_and_reviews_in_parallel(monkeypatch):
     monkeypatch.setattr(handshake, "read_posting", fake_read)
     monkeypatch.setattr(pipeline, "extract_job", fake_extract)
     monkeypatch.setattr(pipeline, "score_job", fake_score)
-    monkeypatch.setattr(pipeline, "tailor_job", lambda job_id: tailored.append(job_id))
+    monkeypatch.setattr(pipeline, "tailor_job", lambda job_id, **_k: tailored.append(job_id))
     monkeypatch.setattr(pipeline, "branches_by_slot", lambda: {"A": ["Existing"]})
     settings = {"model": "claude-opus-5-5", "min_score": 55, "tailor_below": 80}
     new = [(f"par{i}", f"https://h/jobs/p{i}") for i in range(4)] + [("parX", "https://h/captcha"),
@@ -1026,3 +1026,123 @@ def test_gmail_confirmation_never_downgrades_interview():
 def test_gmail_query():
     q = gmail_watch.build_query(['Zippo', 'B "Square"', "", "Zippo"], datetime(2026, 11, 16))
     assert q == 'after:2026/11/16 (from:joinhandshake.com OR "B Square" OR "Zippo") -in:chats'
+
+
+# ---------------- resume picker: originals vs. stored tailored copies ----------------
+def test_score_job_scores_tailored_copies_and_picks_the_highest(monkeypatch):
+    seen = {}
+    fake = matcher.MatchResult(
+        fits=[matcher.ResumeFit(slot="A", score=78, reasons=[], gaps=[]),
+              matcher.ResumeFit(slot="T5", score=88, reasons=["copy"], gaps=[]),
+              matcher.ResumeFit(slot="T99", score=99, reasons=[], gaps=[])],   # not offered: dropped
+        best_slot="A", branch="ops analyst", pitch="p", hard_blocks=[], red_flags=[])
+    monkeypatch.setattr(matcher, "ask_json", lambda *a, **k: seen.update(k=k, system=a[1]) or fake)
+    copies = [{"key": "T5", "id": 5, "slot": "B", "branch": "Ops analyst",
+               "edits": [{"old": "Built dashboards", "new": "Built KPI dashboards"}], "added": None,
+               "record": {"sent": 3, "interviews": 2}}]
+    res = matcher.score_job({"title": "t", "company": "c", "location": "", "job_type": "", "description": "d"},
+                            {"A": "resume a", "B": "resume b"}, "claude-opus-5-5", {"B": ["Ops analyst"]},
+                            tailored=copies, records={"A": {"sent": 4, "interviews": 0}})
+    prefix = seen["k"]["cached_prefix"]
+    assert 'key="T5" base="B"' in prefix and 'sent="3" interviews="2"' in prefix
+    assert '<resume slot="A" sent="4" interviews="0">' in prefix and "Built KPI dashboards" in prefix
+    assert "TRACK RECORD" in seen["system"]
+    assert [f.slot for f in res.fits] == ["A", "T5"]
+    assert res.best_slot == "T5" and matcher.best_fit(res).score == 88
+    assert res.branch == "Ops analyst"                        # matched to the copy's base slot branches
+
+    tie = matcher.MatchResult(fits=[matcher.ResumeFit(slot="T5", score=80, reasons=[], gaps=[]),
+                                    matcher.ResumeFit(slot="A", score=80, reasons=[], gaps=[])],
+                              best_slot="Z", branch="b", pitch="p", hard_blocks=[], red_flags=[])
+    monkeypatch.setattr(matcher, "ask_json", lambda *a, **k: tie)
+    res = matcher.score_job({"title": "t", "company": "c", "location": "", "job_type": "", "description": "d"},
+                            {"A": "resume a"}, "claude-opus-5-5", tailored=copies)
+    assert res.best_slot == "A"                               # a tie goes to the original
+
+
+def test_scorer_picks_stored_copy_and_tailors_fresh_only_as_last_resort(monkeypatch, resume_pdf):
+    from app import pipeline
+    from app.db import Application, Job, Resume, TailoredResume, init_db, session
+
+    init_db()
+    with session() as s:
+        r = Resume(slot="A", filename="pick.pdf", path=str(resume_pdf), pdf_path=str(resume_pdf), text="x")
+        s.add(r)
+        s.commit()
+        good = TailoredResume(resume_id=r.id, slot="A", branch="Picker branch",
+                              edits_json=json.dumps([{"paragraph": 6, "old": "a", "new": "b", "why": "w"}]))
+        plain = TailoredResume(resume_id=r.id, slot="A", branch="Other branch", uses=9)
+        s.add_all([good, plain])
+        s.commit()
+        sent = Job(handshake_id="pick-sent", url="u", title="Old", company="Old Co", status="applied",
+                   resume_slot="A", tailored_id=good.id)
+        s.add(sent)
+        s.commit()
+        s.add(Application(job_id=sent.id, resume_slot="A", tailored=True, status="Interview"))
+        s.commit()
+        good_id, plain_id = good.id, plain.id
+
+    by_slot, by_copy = pipeline.resume_records()
+    assert by_copy[good_id] == {"sent": 1, "interviews": 1}
+    cands = pipeline.tailored_candidates()
+    assert [c["id"] for c in cands][:2] == [good_id, plain_id]   # interview record first, then most used
+
+    offered = {}
+
+    def fake_score(job, resumes, model, branches, scores=None, **kw):
+        offered["keys"] = [c["key"] for c in kw["tailored"]]
+        fits = [matcher.ResumeFit(slot=k, score=v, reasons=[], gaps=[]) for k, v in fake_score.scores.items()]
+        best = max(fits, key=lambda f: f.score).slot
+        return matcher.MatchResult(fits=fits, best_slot=best, branch="Picker branch", pitch="",
+                                   hard_blocks=[], red_flags=[])
+
+    monkeypatch.setattr(pipeline, "score_job", fake_score)
+    settings = {"model": "m", "min_score": 60, "tailor_below": 80, "exclude_titles": [], "skip_part_time": False}
+
+    # 1) a stored copy scores highest and above the cutoff: it's used, nothing new is made
+    fake_score.scores = {"A": 75, f"T{good_id}": 86}
+    job = Job(handshake_id="pick-1", url="u", title="Analyst", company="Co")
+    considered = pipeline._score_into(job, {"A": "x"}, settings, {})
+    assert f"T{good_id}" in offered["keys"] and good_id in considered
+    assert (job.tailored_id, job.resume_slot, job.score, job.status) == (good_id, "A", 86, "queued")
+    assert not pipeline._needs_fresh(job, settings)
+
+    # 2) the original wins: no tailored copy is linked
+    fake_score.scores = {"A": 84, f"T{good_id}": 70}
+    pipeline._score_into(job, {"A": "x"}, settings, {})
+    assert (job.tailored_id, job.resume_slot) == (None, "A")
+
+    # 3) everything scores under 80: last resort, a fresh copy (not the branch copy already compared)
+    fake_score.scores = {"A": 72, f"T{good_id}": 76}
+    considered = pipeline._score_into(job, {"A": "x"}, settings, {})
+    with session() as s:
+        s.add(job)
+        s.commit()
+        s.refresh(job)
+    assert pipeline._needs_fresh(job, settings)
+    plans = []
+    monkeypatch.setattr(pipeline, "plan_tailoring",
+                        lambda *a, **k: plans.append(1) or ([{"paragraph": 6, "old": "a", "new": "c", "why": "w"}], [], None))
+    monkeypatch.setattr(pipeline, "build_doc", lambda tr_id: None)
+    tr = pipeline.tailor_job(job.id, considered=considered)
+    assert plans == [1] and tr.id not in (good_id, plain_id)
+    with session() as s:
+        job = s.get(Job, job.id)
+    assert job.tailored_id == tr.id
+    assert not pipeline._needs_fresh(job, settings)         # it has its own copy now: no re-tailoring
+
+
+def test_scorer_may_favor_a_proven_resume_only_on_a_near_tie(monkeypatch):
+    copies = [{"key": "T5", "id": 5, "slot": "A", "branch": "b", "edits": [], "added": None,
+               "record": {"sent": 4, "interviews": 3}}]
+
+    def run(a, t, pick):
+        fake = matcher.MatchResult(fits=[matcher.ResumeFit(slot="A", score=a, reasons=[], gaps=[]),
+                                         matcher.ResumeFit(slot="T5", score=t, reasons=[], gaps=[])],
+                                   best_slot=pick, branch="b", pitch="p", hard_blocks=[], red_flags=[])
+        monkeypatch.setattr(matcher, "ask_json", lambda *a_, **k: fake)
+        return matcher.score_job({"title": "t", "company": "c", "location": "", "job_type": "", "description": "d"},
+                                 {"A": "resume a"}, "m", tailored=copies).best_slot
+
+    assert run(84, 81, "T5") == "T5"     # within 5 points: the proven copy may win
+    assert run(90, 81, "T5") == "A"      # a poor fit isn't lifted by its record

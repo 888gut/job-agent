@@ -242,43 +242,8 @@ def skip(job_id: int):
     return {"ok": True}
 
 
-@app.post("/api/jobs/{job_id}/tailor")
-async def tailor(job_id: int, fresh: bool = False):
-    with session() as s:
-        j = s.get(Job, job_id)
-        if j and j.is_demo:
-            return {"ok": False, "message": "This is sample data."}
-    try:
-        tr = await asyncio.get_running_loop().run_in_executor(None, pipeline.tailor_job, job_id, fresh)
-        if not tr:
-            return {"ok": True, "message": "No safe improvements found; the original resume will be used."}
-        return {"ok": True, "message": "Tailored resume ready." if tr.doc_url else
-                "Tailored edits ready. The Google Doc is created once your storage account is connected."}
-    except Exception as e:
-        return {"ok": False, "message": str(e)}
-
-
-@app.post("/api/jobs/{job_id}/use-original")
-def use_original(job_id: int):
-    """Send the original resume for this job. The tailored Doc is kept for its branch."""
-    with session() as s:
-        j = s.get(Job, job_id)
-        j.tailored_id = None
-        s.add(j)
-        s.commit()
-    return {"ok": True}
-
-
-@app.post("/api/jobs/{job_id}/use-tailored/{tr_id}")
-def use_tailored(job_id: int, tr_id: int):
-    with session() as s:
-        j, tr = s.get(Job, job_id), s.get(TailoredResume, tr_id)
-        if not tr:
-            raise HTTPException(404)
-        j.tailored_id = tr.id
-        s.add(j)
-        s.commit()
-    return {"ok": True}
+# The resume for each job is picked by the scorer (originals vs. stored tailored copies);
+# there is no manual resume choice. See pipeline._score_into and pipeline._needs_fresh.
 
 
 @app.post("/api/jobs/{job_id}/open")

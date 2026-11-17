@@ -336,8 +336,8 @@ function jobCard(j) {
   const resumeInfo = t ? `
       <div class="branchbox">
         <div><span class="pill branch" title="${esc(t.branch)}">${esc(t.branch)}</span>
-          ${t.reused ? `Reusing the tailored Resume ${esc(t.slot)} first made for <b>${esc(t.made_for)}</b> (used ${t.uses}×).`
-                     : `New one-off tailored copy of Resume ${esc(t.slot)} for this branch.`}
+          ${t.reused ? `The agent picked the stored tailored Resume ${esc(t.slot)} first made for <b>${esc(t.made_for)}</b> (used ${t.uses}×): it scored highest.`
+                     : `No stored resume scored high enough, so the agent made a new tailored copy of Resume ${esc(t.slot)}.`}
           ${t.doc_url ? "" : `<span class="muted">The Google Doc is created once your storage account is connected.</span>`}</div>
         <div class="muted small" style="margin-top:3px">Your base Resume ${esc(t.slot)} isn't changed. Edits you make in the Google Doc are included when the agent applies.</div>
       </div>
@@ -346,7 +346,7 @@ function jobCard(j) {
         <div class="muted small">${esc(t.added.why || "")} (from your confirmed Career Facts)</div></div>` : ""}
       ${t.rejected.length ? `<details class="mt"><summary class="muted">${t.rejected.length} edit(s) blocked by the checks (no new facts, same layout)</summary>
         <ul class="bullets">${t.rejected.map((r) => `<li>${esc(r.new)} <span class="muted">(${esc(r.problems.join(", "))})</span></li>`).join("")}</ul></details>` : ""}`
-    : `<p class="muted" style="margin:4px 0">Sending your original Resume ${esc(j.resume_slot)}, unchanged.${j.branch ? ` Branch: <span class="pill branch" title="${esc(j.branch)}">${esc(j.branch)}</span>` : ""}</p>`;
+    : `<p class="muted" style="margin:4px 0">The agent picked your original Resume ${esc(j.resume_slot)}, unchanged: it scored highest.${j.branch ? ` Branch: <span class="pill branch" title="${esc(j.branch)}">${esc(j.branch)}</span>` : ""}</p>`;
   return `<div class="card" data-id="${j.id}">
     <div class="card-head" tabindex="0" aria-expanded="false" title="Show or hide details">
       ${logo(j.company)}
@@ -376,8 +376,6 @@ function jobCard(j) {
       <div style="margin-top:6px">${resumeInfo}</div>
       <div class="btn-row mt">
         ${docLink}
-        ${t ? `<button class="btn small" data-act="fresh">Tailor fresh for this job</button><button class="btn small" data-act="original">Use original resume</button>`
-            : `<button class="btn small" data-act="tailor">Tailor for this job</button>`}
         <button class="btn small" data-act="open">View posting</button>
       </div>
     </div></div>`;
@@ -399,11 +397,6 @@ async function jobAction(b) {
       busy(b, true, "Applying…");
       const r = await post(`/api/jobs/${id}/approve`); toast(r.message, r.ok);
     } else if (act === "skip") { busy(b, true, "Skipping…"); await post(`/api/jobs/${id}/skip`); toast("Skipped."); }
-    else if (act === "tailor" || act === "fresh") {
-      busy(b, true, "Tailoring…");
-      const r = await post(`/api/jobs/${id}/tailor${act === "fresh" ? "?fresh=true" : ""}`); toast(r.message, r.ok);
-    }
-    else if (act === "original") { busy(b, true, "Switching…"); await post(`/api/jobs/${id}/use-original`); toast("Will send the original resume. The tailored Doc is kept for its branch."); }
     else if (act === "open") { await withBusy(b, "Opening…", async () => { const r = await post(`/api/jobs/${id}/open`); toast(r.message); }); return; }
     else if (act === "mark") { busy(b, true, "Saving…"); await post(`/api/jobs/${id}/mark-applied`); toast("Recorded as applied."); }
     else if (act === "employer") {
@@ -501,12 +494,12 @@ render.resumes = async () => {
         <b>${r ? "Replace" : "Upload"} Resume ${k}</b><br>Drop a PDF or Word file here, or click to browse</label></div>
     </div></div>`;
   };
-  view.innerHTML = `<h1>Resumes &amp; Transcript</h1><p class="subtitle">Every job is matched against both base resumes. They are never edited: tailoring happens in one-off Google Doc copies, one per job branch.</p>
+  view.innerHTML = `<h1>Resumes &amp; Transcript</h1><p class="subtitle">Every job is scored against both base resumes and the stored tailored copies, and the best one is sent. Base resumes are never edited: tailoring happens in Google Doc copies.</p>
     <div class="slots">${slot("A")}${slot("B")}</div>
     <div id="fmtCheck"></div>
     <div id="transcriptPanel"><div class="panel mt"><div class="panel-head">Transcript</div><div class="panel-body"><div class="loading" style="padding:20px"><span class="busy"></span> Loading…</div></div></div></div>
     <h2>Tailored resumes by branch</h2>
-    <p class="muted" style="margin-top:-4px">A tailored copy is made the first time a job in a new branch comes up, then reused for later jobs in the same branch.</p>
+    <p class="muted" style="margin-top:-4px">A new tailored copy is made only when no stored resume scores high enough. Copies that led to interviews are compared first for new jobs.</p>
     ${d.tailored.length ? `<div class="table-wrap"><table class="listview mid-table"><thead><tr><th>Branch</th><th>Based on</th><th>First made for</th><th>Edits</th><th>Used</th><th>Files</th></tr></thead><tbody>
       ${d.tailored.map((t) => `<tr><td><span class="pill branch" title="${esc(t.branch)}">${esc(t.branch)}</span></td><td class="nowrap"><span class="pill slot">Resume ${esc(t.slot)}</span></td>
       <td>${esc(t.made_for)}</td><td>${t.edits.length}</td><td class="nowrap">${t.uses}×</td>
@@ -692,7 +685,7 @@ render.settings = async () => {
       <label for="max_commute_minutes">Longest commute (min)</label><input type="number" id="max_commute_minutes" min="0" max="300" value="${s.max_commute_minutes}" style="width:90px" aria-describedby="commuteHelp">
       <div class="help" id="commuteHelp">On-site or hybrid jobs farther than this from Location score at most 45.</div>
       <label for="tailor_below">Tailor when below</label><input type="number" id="tailor_below" min="0" max="101" value="${s.tailor_below}" style="width:90px" aria-describedby="tailorHelp">
-      <div class="help" id="tailorHelp">Jobs between the minimum and this score get a tailored resume.</div>
+      <div class="help" id="tailorHelp">The agent scores each job against both originals and your stored tailored copies, favoring resumes that got interviews. If even the best one scores below this, it makes a new tailored copy.</div>
       <label for="max_new_per_run">New jobs per search</label><input type="number" id="max_new_per_run" min="1" max="100" value="${s.max_new_per_run}" style="width:90px">
       <label for="model">Claude model</label><input type="text" id="model" value="${esc(s.model)}" style="width:220px;max-width:100%">
     </div></div></div>

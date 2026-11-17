@@ -63,7 +63,15 @@ hard_blocks: requirements the candidate clearly cannot meet, each a short phrase
 red_flags: signs the posting may not be a real entry-level job, each a short phrase: commission-only
  or commission-heavy pay, full-time pay far below minimum wage, vague duties with recruiting or
  "training program" fees, a staffing middleman hiding the real employer, requests for money or
- personal financial details. [] when none."""
+ personal financial details. [] when none.
+TAILORED COPIES: besides the base resumes you may see stored tailored copies, each a lightly reworded
+ version of one base resume, listed by its key (e.g. "T12") as the lines it changes. Score every
+ tailored copy too, as its own entry in fits with slot set to its key, judging the base resume with
+ those lines swapped in. best_slot is the slot or key of the single highest-scoring resume, original
+ or tailored. On a tie, prefer the original.
+TRACK RECORD: a resume or copy may show how many applications it was sent with and how many led to
+ an interview or offer. Fit to THIS job comes first; use a good record only to break a near-tie
+ (within about 5 points), never to lift a poor fit."""
 
 
 _SPACES = re.compile(r"[ \t ]+")
@@ -87,12 +95,15 @@ def extract_job(page_text: str, url: str, model: str) -> JobExtract:
     )
 
 
-def resumes_block(resumes: dict[str, str]) -> str:
+def resumes_block(resumes: dict[str, str], records: dict[str, dict] | None = None) -> str:
     """The resumes, identical for every posting in a run: sent first and prompt-cached."""
-    return "\n\n".join(f"<resume slot=\"{slot}\">\n{text}\n</resume>" for slot, text in resumes.items())
+    records = records or {}
+    return "\n\n".join(f'<resume slot="{slot}"{_record(records.get(slot))}>\n{text}\n</resume>'
+                         for slot, text in resumes.items())
 
 
 CAP = 45  # the most a job with a hard block or red flag can score
+NEAR_TIE = 5  # points within which the scorer may favor a resume with a better interview record
 
 
 def screen(job: dict, settings: dict) -> str | None:
@@ -111,8 +122,12 @@ def screen(job: dict, settings: dict) -> str | None:
 
 
 def score_job(job: dict, resumes: dict[str, str], model: str,
-              branches: dict[str, list[str]] | None = None, home: str = "", commute: int = 75) -> MatchResult:
-    """resumes: {"A": text, "B": text}; branches: existing tailored branches per slot."""
+              branches: dict[str, list[str]] | None = None, home: str = "", commute: int = 75,
+              tailored: list[dict] | None = None, records: dict[str, dict] | None = None) -> MatchResult:
+    """resumes: {"A": text, "B": text}; branches: existing tailored branches per slot;
+    tailored: stored tailored copies scored alongside the originals (see tailored_block);
+    records: track record of each original, {"A": {"sent": n, "interviews": m}}."""
+    tailored = tailored or []
     branches = branches or {}
     listing = "\n".join(f"Slot {s}: {', '.join(b) if b else '(none yet)'}" for s, b in
                         ((s, branches.get(s, [])) for s in resumes))
@@ -122,18 +137,50 @@ def score_job(job: dict, resumes: dict[str, str], model: str,
     )
     system = SCORE_SYSTEM.replace("{home}", home or "the candidate's city").replace("{commute}", str(commute))
     result = ask_json(MatchResult, system, user, model=model, effort="medium",
-                      cached_prefix=resumes_block(resumes))
-    known = {b.lower(): b for b in branches.get(result.best_slot, [])}
-    result.branch = known.get(result.branch.strip().lower(), result.branch.strip())
+                      cached_prefix=resumes_block(resumes, records) + tailored_block(tailored))
+    valid = set(resumes) | {c["key"] for c in tailored}
+    result.fits = [f for f in result.fits if f.slot in valid]
     for f in result.fits:
         f.score = max(0, min(100, int(f.score)))
         if result.hard_blocks or result.red_flags:
             f.score = min(f.score, CAP)
             f.gaps = [f"Hard requirement: {b}" for b in result.hard_blocks] + \
                      [f"Red flag: {b}" for b in result.red_flags] + f.gaps
-    if result.best_slot not in resumes:
-        result.best_slot = max(result.fits, key=lambda f: f.score).slot if result.fits else next(iter(resumes))
+    if result.fits:
+        # The highest score wins. Claude's own pick stands if it is within NEAR_TIE points of the top
+        # (that's where a better interview record may decide); otherwise an original beats a copy on a tie.
+        top = max(f.score for f in result.fits)
+        picked = next((f.score for f in result.fits if f.slot == result.best_slot), None)
+        if picked is None or picked < top - NEAR_TIE:
+            tied = [f.slot for f in result.fits if f.score == top]
+            result.best_slot = next((t for t in tied if t in resumes), tied[0])
+    elif result.best_slot not in valid:
+        result.best_slot = next(iter(resumes))
+    base_of = {c["key"]: c["slot"] for c in tailored}
+    known = {b.lower(): b for b in branches.get(base_of.get(result.best_slot, result.best_slot), [])}
+    result.branch = known.get(result.branch.strip().lower(), result.branch.strip())
     return result
+
+
+def _record(rec: dict | None) -> str:
+    if not rec or not rec.get("sent"):
+        return ""
+    return f' sent="{rec["sent"]}" interviews="{rec.get("interviews", 0)}"'
+
+
+def tailored_block(copies: list[dict]) -> str:
+    """Stored tailored copies, written as the lines each one changes in its base resume.
+    copies: [{"key": "T12", "slot": "A", "branch": str, "edits": [{"old", "new"}], "added": dict | None,
+              "record": {"sent": int, "interviews": int} | None}]"""
+    out = []
+    for c in copies:
+        lines = [f'<tailored_copy key="{c["key"]}" base="{c["slot"]}" branch="{c["branch"]}"{_record(c.get("record"))}>']
+        lines += [f"- replaces: {e['old']}\n  with: {e['new']}" for e in c.get("edits", [])]
+        if c.get("added"):
+            lines.append(f"- adds project: {c['added']['title']}: {c['added']['text']}")
+        lines.append("</tailored_copy>")
+        out.append("\n".join(lines))
+    return ("\n\nTAILORED COPIES\n" + "\n\n".join(out)) if out else ""
 
 
 def best_fit(result: MatchResult) -> ResumeFit | None:

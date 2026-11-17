@@ -185,6 +185,58 @@ def find_branch_resume(resume_id: int, branch: str) -> TailoredResume | None:
             TailoredResume.is_demo == False).order_by(TailoredResume.created_at.desc())).first()  # noqa: E712
 
 
+SUCCESS = ("Interview", "Offer")
+MAX_CANDIDATES = 12   # stored tailored copies the scorer compares per posting (best record first)
+
+
+def resume_records() -> tuple[dict[str, dict], dict[int, dict]]:
+    """How each resume has done so far: applications sent with it and how many reached an
+    interview or offer. Returns (by original slot, by tailored copy id). This is what feeds the
+    results of past applications back into intake."""
+    by_slot: dict[str, dict] = {}
+    by_copy: dict[int, dict] = {}
+    with session() as s:
+        rows = s.exec(select(Application, Job).where(Application.job_id == Job.id)
+                      .where(Application.is_demo == False)).all()  # noqa: E712
+    for a, j in rows:
+        rec = (by_copy.setdefault(j.tailored_id, {"sent": 0, "interviews": 0}) if a.tailored and j.tailored_id
+               else by_slot.setdefault(a.resume_slot or "?", {"sent": 0, "interviews": 0}))
+        rec["sent"] += 1
+        rec["interviews"] += a.status in SUCCESS
+    return by_slot, by_copy
+
+
+def tailored_candidates(include_ids=(), limit: int = MAX_CANDIDATES,
+                        records: dict[int, dict] | None = None) -> list[dict]:
+    """Stored tailored copies of the current base resumes, for the scorer to compare with the
+    originals. Copies that led to interviews come first, then the most used and the newest."""
+    cur = {r.id: slot for slot, r in current_resumes().items()}
+    records = resume_records()[1] if records is None else records
+    with session() as s:
+        rows = s.exec(select(TailoredResume).where(TailoredResume.resume_id.in_(list(cur) or [0]))
+                      .where(TailoredResume.is_demo == False)).all()  # noqa: E712
+    zero = {"sent": 0, "interviews": 0}
+    rows.sort(key=lambda t: (records.get(t.id, zero)["interviews"], t.uses, t.created_at), reverse=True)
+    keep = rows[:limit] + [t for t in rows[limit:] if t.id in set(include_ids)]
+    return [{"key": f"T{t.id}", "id": t.id, "slot": cur[t.resume_id], "branch": t.branch,
+             "edits": [{"old": e["old"], "new": e["new"]} for e in json.loads(t.edits_json)],
+             "added": json.loads(t.added_json) if t.added_json else None,
+             "record": records.get(t.id)} for t in keep]
+
+
+def _needs_fresh(job: Job, settings: dict) -> bool:
+    """Last resort: a new tailored copy only when even the best resume (original or stored copy)
+    scores under the cutoff, and this job doesn't already have its own copy."""
+    if job.status == "skipped" or (job.score or 0) >= int(settings["tailor_below"]):
+        return False
+    if job.tailored_id:
+        with session() as s:
+            tr = s.get(TailoredResume, job.tailored_id)
+        if tr and job.id is not None and tr.created_for_job_id == job.id:
+            return False
+    return True
+
+
 def _link(job_id: int, tr_id: int | None) -> None:
     with session() as s:
         job = s.get(Job, job_id)
@@ -202,8 +254,13 @@ def _branch_lock(resume_id: int, branch: str) -> threading.Lock:
         return _branch_locks.setdefault((resume_id, branch.strip().lower()), threading.Lock())
 
 
-def tailor_job(job_id: int, fresh: bool = False) -> TailoredResume | None:
-    """Give this job a tailored resume: reuse the branch's Doc, or make a new one-off."""
+def tailor_job(job_id: int, fresh: bool = False, considered=None) -> TailoredResume | None:
+    """Give this job a tailored resume: reuse the branch's Doc, or make a new one-off.
+
+    considered: ids of the stored copies the scorer already compared for this job. Those lost
+    (or still scored under the cutoff), so they aren't reused here; a copy made for the branch
+    after scoring (e.g. by a parallel review in the same run) still is."""
+    considered = set(considered or ())
     settings = get_settings()
     with session() as s:
         job = s.get(Job, job_id)
@@ -218,7 +275,7 @@ def tailor_job(job_id: int, fresh: bool = False) -> TailoredResume | None:
     with _branch_lock(r.id, branch):
         if not fresh:
             existing = find_branch_resume(r.id, branch)
-            if existing:
+            if existing and existing.id not in considered:
                 _link(job_id, existing.id)
                 log(f"Reusing the '{branch}' tailored Resume {r.slot} for {job.company}", "info", job_id)
                 return existing
@@ -227,9 +284,8 @@ def tailor_job(job_id: int, fresh: bool = False) -> TailoredResume | None:
         accepted, rejected, added = plan_tailoring(
             _job_dict(job), r.path, settings["model"],
             verified=facts.verified_text(r, others), facts_prompt=facts.facts_prompt(others))
-        if not accepted and not added:
-            _link(job_id, None)
-            log(f"No safe improvements found for {job.company}; using the original Resume {r.slot}", "info", job_id)
+        if not accepted and not added:  # keep the resume the scorer picked
+            log(f"No safe improvements found for {job.company}; keeping the best-scoring resume", "info", job_id)
             return None
         with session() as s:
             tr = TailoredResume(resume_id=r.id, slot=r.slot, branch=branch, created_for_job_id=job_id,
@@ -563,8 +619,8 @@ def _analyze_posting(hid: str, url: str, page_text: str, resume_texts: dict, set
               job_type=ex.job_type, deadline=ex.deadline, description=ex.description, apply_type=ex.apply_type)
 
     with (run.turn(ticket) if run else contextlib.nullcontext()):
-        _score_into(job, resume_texts, settings, run.branches() if run else branches_by_slot())
-        if run and job.status == "queued" and job.score < int(settings["tailor_below"]):
+        considered = _score_into(job, resume_texts, settings, run.branches() if run else branches_by_slot())
+        if run and _needs_fresh(job, settings):
             run.pending.setdefault(job.resume_slot or "A", set()).add(job.branch)
     job.updated_at = now()
     with session() as s:
@@ -575,28 +631,38 @@ def _analyze_posting(hid: str, url: str, page_text: str, resume_texts: dict, set
     if job.status == "skipped":
         log(f"Skipped {job.title} at {job.company} (match {job.score})", "info", job.id)
         return
-    if job.score < int(settings["tailor_below"]):
-        tailor_job(job.id)
+    if _needs_fresh(job, settings):
+        tailor_job(job.id, considered=considered)
     log(f"Queued {job.title} at {job.company} (match {job.score}, Resume {job.resume_slot})", "success", job.id)
 
 
-def _score_into(job: Job, resume_texts: dict, settings: dict, branches: dict) -> None:
-    """Screen and score a job, writing score, slot, reasons, gaps, pitch, branch and status."""
+def _score_into(job: Job, resume_texts: dict, settings: dict, branches: dict) -> set[int]:
+    """Screen and score a job, writing score, resume, reasons, gaps, pitch, branch and status.
+
+    The scorer compares the original resumes with the stored tailored copies (each with its
+    interview record) and the best-scoring one becomes this job's resume. Returns the ids of the
+    copies it compared."""
     reason = screen(_job_dict(job), settings)
     if reason:
         job.score, job.reasons_json, job.gaps_json, job.status = 0, "[]", json.dumps([reason]), "skipped"
         job.resume_slot = job.resume_slot or next(iter(resume_texts), None)
-        return
+        return set()
+    slot_records, copy_records = resume_records()
+    candidates = tailored_candidates([job.tailored_id] if job.tailored_id else [], records=copy_records)
     match = score_job(_job_dict(job), resume_texts, settings["model"], branches,
-                      home=settings.get("location", ""), commute=int(settings.get("max_commute_minutes", 75)))
+                      home=settings.get("location", ""), commute=int(settings.get("max_commute_minutes", 75)),
+                      tailored=candidates, records=slot_records)
     fit = best_fit(match)
+    chosen = next((c for c in candidates if fit and c["key"] == fit.slot), None)
     job.score = fit.score if fit else 0
-    job.resume_slot = fit.slot if fit else None
+    job.resume_slot = chosen["slot"] if chosen else (fit.slot if fit else None)
+    job.tailored_id = chosen["id"] if chosen else None
     job.reasons_json = json.dumps(fit.reasons if fit else [])
     job.gaps_json = json.dumps(fit.gaps if fit else [])
     job.pitch = match.pitch
     job.branch = match.branch
     job.status = "skipped" if job.score < int(settings["min_score"]) else "queued"
+    return {c["id"] for c in candidates}
 
 
 def rescore_open_jobs(include_skipped: bool = True) -> list[dict]:
@@ -611,15 +677,15 @@ def rescore_open_jobs(include_skipped: bool = True) -> list[dict]:
     changes = []
     for job in jobs:
         before = (job.status, job.score)
-        _score_into(job, resume_texts, settings, branches_by_slot())
+        considered = _score_into(job, resume_texts, settings, branches_by_slot())
         if job.status == "queued" and before[0] == "needs_manual":
             job.status = "needs_manual"
         job.updated_at = now()
         with session() as s:
             s.add(job)
             s.commit()
-        if job.status != "skipped" and not job.tailored_id and job.score < int(settings["tailor_below"]):
-            tailor_job(job.id)
+        if _needs_fresh(job, settings):
+            tailor_job(job.id, considered=considered)
         changes.append({"id": job.id, "title": job.title, "company": job.company,
                         "before": before, "after": (job.status, job.score), "gaps": json.loads(job.gaps_json)[:3]})
         log(f"Rescored {job.title} at {job.company}: {before[1]} -> {job.score} ({job.status})", "info", job.id)

@@ -22,8 +22,9 @@ flowchart LR
     H --> I[Google Sheet log + Gmail status updates]
 ```
 
-- **Matching:** every posting is scored 0-100 against both base resumes. The agent picks the better resume and explains why it fits and what's missing.
-- **Branches:** each job is tagged with a job family (e.g. "Supply chain data analyst"). The first job in a branch gets a one-off tailored resume, and later jobs in the same branch reuse it.
+- **Matching:** every posting is scored 0-100 against both base resumes *and* the tailored copies already in storage. The agent picks the best one itself and explains why it fits and what's missing.
+- **Tailoring is the last resort:** a new tailored copy is made only when even the best stored resume scores under the cutoff. Each job is tagged with a job family (e.g. "Supply chain data analyst") so copies stay organized.
+- **Learns from results:** every resume carries its track record (applications sent, interviews or offers from Gmail). Proven copies are compared first, and a better record can decide a near-tie.
 - **Tailoring that keeps your format:** the base resume PDFs are never modified.
   - Each resume gets a Google Doc *master*, rebuilt from the PDF's actual fonts, sizes and positions. It's checked against the original line by line (within 1pt).
   - Tailored copies swap in reworded bullets, and the swapped text keeps the styling of the text it replaces.
