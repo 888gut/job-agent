@@ -843,3 +843,24 @@ a.btn, a.btn:hover { text-decoration: none; }
 .hs-next .btn { margin-left: auto; }
 .hs-next.ok { border-color: #8cc47a; background: color-mix(in srgb, #3f9a2b 8%, var(--client, #fff)); }
 .hs-next.warn { border-color: #e0b55a; background: color-mix(in srgb, #d9930f 8%, var(--client, #fff)); }
+
+/* signed-in badge and corner notice */
+.hs-confirmed { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; color: #2f7d1f; }
+.hs-confirmed::before { content: ""; width: 14px; height: 14px; border-radius: 50%; flex: none;
+  background: #3f9a2b url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cpath d='M3.5 7.2l2.2 2.2 4.8-5' fill='none' stroke='white' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/14px no-repeat; }
+:root[data-theme="dark"] .hs-confirmed { color: #8fd27a; }
+.hs-bar .hs-confirmed { padding: 0 6px; font-size: 12.5px; }
+.dot.busy { background: #d9930f; }
+.notice { position: fixed; right: 22px; bottom: 34px; z-index: 50; display: flex; gap: 10px; align-items: flex-start;
+  max-width: 340px; padding: 12px 34px 12px 12px; border-radius: 6px; border: 1px solid var(--line, #c6d3e0);
+  background: var(--client, #fff); color: var(--text, #1b2a3a); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  transform: translateY(16px); opacity: 0; pointer-events: none; transition: transform .25s ease, opacity .25s ease; }
+.notice.show { transform: none; opacity: 1; pointer-events: auto; }
+.notice .icon { width: 28px; height: 28px; flex: none; }
+.notice b { display: block; margin-bottom: 2px; }
+.notice.ok { border-left: 4px solid #3f9a2b; }
+.notice.warn { border-left: 4px solid #d9930f; }
+.notice-x { position: absolute; top: 6px; right: 6px; border: 0; background: none; color: inherit; cursor: pointer; font-size: 12px; opacity: .6; }
+.notice-x:hover { opacity: 1; }
+@media (max-width: 760px) { .notice { left: 12px; right: 12px; bottom: 72px; max-width: none; } }
+@media (prefers-reduced-motion: reduce) { .notice { transition: none; } }

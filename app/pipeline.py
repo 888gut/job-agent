@@ -15,7 +15,7 @@ from sqlmodel import func, select
 
 from . import facts, google_store, handshake, layout
 from .config import MASTERS, TAILORED
-from .db import Application, Job, Resume, TailoredResume, get_settings, log, now, session
+from .db import Application, Job, Resume, TailoredResume, get_settings, log, now, save_settings, session
 from .matcher import best_fit, extract_job, score_job
 from .tailor import parse_layout, plan_tailoring
 
@@ -30,6 +30,11 @@ def current_resumes() -> dict[str, Resume]:
         for r in s.exec(select(Resume).order_by(Resume.uploaded_at)):
             out[r.slot] = r  # newest per slot wins
         return out
+
+
+def record_handshake_login(ok: bool) -> None:
+    """Remember the last confirmed Handshake sign-in, so the dashboard can show it without a check."""
+    save_settings({"hs_logged_in": bool(ok), "hs_checked_at": now().isoformat()})
 
 
 def applied_today() -> int:
@@ -305,7 +310,9 @@ def _run_search() -> None:
     resume_texts = {slot: r.text for slot, r in resumes.items()}
 
     state["stage"] = "Checking Handshake sign-in"
-    if not _hs(handshake.is_logged_in):
+    signed_in = _hs(handshake.is_logged_in)
+    record_handshake_login(signed_in)
+    if not signed_in:
         log("Not signed in to Handshake. Use Settings > Sign in to Handshake.", "warn")
         return
 
@@ -562,6 +569,8 @@ def approve(job_id: int) -> dict:
     if result.status != "applied":
         _set_status(job_id, "needs_manual", result.note)
         log(f"{job.company}: {result.note}", "warn", job_id)
+        if result.status == "blocked" and "sign in" in result.note.lower():
+            record_handshake_login(False)
         return {"ok": False, "message": result.note, "blocked": result.status == "blocked"}
 
     _set_status(job_id, "applied", result.note)

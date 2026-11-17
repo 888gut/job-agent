@@ -608,6 +608,53 @@ function showFormatCheck(k) {
   $("#fmtCheck").scrollIntoView({ behavior: "smooth" });
 }
 
+// ---------- Handshake sign-in status (Settings) ----------
+function hsConnRow(h, checking = false) {
+  const ok = h?.logged_in === true;
+  const when = h?.checked_at ? ` · confirmed ${ago(h.checked_at)}` : "";
+  let desc, btns;
+  if (checking) {
+    desc = `<span class="busy" aria-hidden="true"></span> Checking your Handshake sign-in…`;
+    btns = "";
+  } else if (h?.signin_open) {
+    desc = "Signing in now in the Handshake tab. Click Done signing in there when you're finished.";
+    btns = `<button class="btn small" id="hsOpenTab">Open Handshake tab</button>`;
+  } else if (ok) {
+    desc = `<span class="hs-confirmed">Signed in</span>${when}. The agent uses this session to search and apply. Your password is never stored.`;
+    btns = `<button class="btn small" id="hsOpenTab">Open Handshake tab</button>`;
+  } else {
+    desc = (h?.logged_in === false ? `Not signed in${when}. ` : "") + "Sign in once from the dashboard's Handshake tab. Your password is never stored.";
+    btns = `<button class="btn small primary" id="hsLogin">Sign in to Handshake</button>`;
+  }
+  const dot = checking ? "busy" : ok ? "on" : "off";
+  return `<div class="conn"><span class="dot ${dot}" role="img" aria-label="${ok ? "Signed in" : "Not signed in"}"></span><div style="min-width:0"><div class="name">Handshake</div><div class="desc">${desc}</div></div><div class="btn-row">${btns}</div></div>`;
+}
+function wireHsConn() {
+  $("#hsLogin")?.addEventListener("click", () => { live.autoSignIn = true; location.hash = "#/handshake"; });
+  $("#hsOpenTab")?.addEventListener("click", () => { location.hash = "#/handshake"; });
+}
+async function confirmHandshake() {
+  const box = $("#hsConn"); if (!box) return;
+  box.innerHTML = hsConnRow(null, true);
+  let r;
+  try { r = await api("/api/handshake/status"); } catch { r = null; }
+  if (!document.contains(box)) return;
+  box.innerHTML = hsConnRow(r || { logged_in: null });
+  wireHsConn();
+  if (r?.checked && r.logged_in) notice("Signed in to Handshake", "Confirmed with the agent's browser just now. You're ready to apply.");
+  else if (r?.checked && r.logged_in === false) notice("Not signed in to Handshake", "Click Sign in to Handshake to sign in from the dashboard.", false);
+}
+// A small slide-in notice in the corner of the window, like a system tray balloon.
+function notice(title, text, ok = true) {
+  let n = $("#notice");
+  if (!n) { n = document.createElement("div"); n.id = "notice"; n.setAttribute("role", "status"); document.body.append(n); }
+  n.className = "notice " + (ok ? "ok" : "warn");
+  n.innerHTML = `<svg class="icon" aria-hidden="true"><use href="#${ok ? "i-shield" : "i-info"}"/></svg><div><b>${esc(title)}</b><div>${esc(text)}</div></div><button class="notice-x" aria-label="Close">&#10005;</button>`;
+  n.querySelector(".notice-x").onclick = () => n.classList.remove("show");
+  requestAnimationFrame(() => n.classList.add("show"));
+  clearTimeout(n._h); n._h = setTimeout(() => n.classList.remove("show"), 6000);
+}
+
 render.settings = async () => {
   const [s, c] = await Promise.all([api("/api/settings"), api("/api/connections").catch(() => null)]);
   const conn = (ok, name, desc, btns) => `<div class="conn"><span class="dot ${ok ? "on" : "off"}" role="img" aria-label="${ok ? "Connected" : "Not connected"}"></span><div style="min-width:0"><div class="name">${name}</div><div class="desc">${desc}</div></div><div class="btn-row">${btns}</div></div>`;
@@ -615,8 +662,7 @@ render.settings = async () => {
     <div class="panel"><div class="panel-head">Connections</div><div class="panel-body" style="padding:0 12px">
       ${c ? [
         conn(c.anthropic, "Claude API", c.anthropic ? "API key found in .env" : "Add ANTHROPIC_API_KEY to the .env file, then restart.", ""),
-        conn(false, "Handshake", "Sign in once in the agent's own Chrome window (a Chrome profile named \"Job Agent\", separate from your everyday Chrome, so the agent can apply for you). Your password is never stored.",
-          `<button class="btn small" id="hsCheck">Check</button><button class="btn small primary" id="hsLogin">Sign in to Handshake</button>`),
+        `<div id="hsConn">${hsConnRow(c.handshake)}</div>`,
         conn(c.storage.connected, "Storage Gmail (Sheet, Docs, Drive)", c.storage.connected ? `Connected as ${esc(c.storage.email || "?")}${c.storage.sheet_url ? ` · <a href="${esc(c.storage.sheet_url)}" target="_blank" rel="noopener">Open Sheet</a>` : ""}` : (c.google_client_file ? "Application log (Sheet) and tailored resumes (Google Docs)." : "Add credentials.json first (see SETUP.md)."),
           c.storage.connected ? `<button class="btn small" data-dis="storage">Disconnect</button>` : `<button class="btn small" data-con="storage" ${c.google_client_file ? "" : "disabled"}>Connect</button>`),
         conn(c.handshake_gmail.connected, "Handshake Gmail", c.handshake_gmail.connected ? `Connected as ${esc(c.handshake_gmail.email || "?")} · checks every 30 min, files confirmations under Job Agent/Submitted and interviews under Job Agent/Interviews` : "Reads application emails to update statuses and files them under Job Agent labels. Never sends or deletes mail.",
@@ -661,16 +707,11 @@ render.settings = async () => {
     refreshChrome();
   });
   $("#loadDemo").onclick = (e) => withBusy(e.currentTarget, "Loading…", async () => { await post("/api/demo/load"); toast("Sample data loaded."); refreshChrome(); });
-  $("#hsLogin")?.addEventListener("click", () => { live.autoSignIn = true; location.hash = "#/handshake"; });
-  $("#hsCheck")?.addEventListener("click", (e) => {
-    const btn = e.currentTarget;
-    return withBusy(btn, "Checking…", async () => {
-      const r = await api("/api/handshake/status");
-      const dot = btn.closest(".conn").querySelector(".dot"); dot.className = "dot " + (r.logged_in ? "on" : "err");
-      dot.setAttribute("aria-label", r.logged_in ? "Signed in" : "Not signed in");
-      toast(r.logged_in ? "Signed in to Handshake." : "Not signed in yet.", r.logged_in);
-    });
-  });
+  wireHsConn();
+  // Confirm the sign-in on its own when the last check is old (or there's never been one).
+  const hs = c?.handshake;
+  const age = hs?.checked_at ? Date.now() - toDate(hs.checked_at) : Infinity;
+  if (hs && !hs.signin_open && (hs.logged_in !== true || age > 10 * 60 * 1000)) confirmHandshake();
   $("#gmCheck")?.addEventListener("click", (e) => checkGmail(e.currentTarget));
   view.querySelectorAll("[data-con]").forEach((b) => b.onclick = async () => {
     busy(b, true, "Waiting for Google…"); toast("A Google sign-in page opened in your browser. Pick the right account there.");
@@ -717,7 +758,8 @@ function liveChrome(s) {
   $("#hsUrl").textContent = url; $("#hsUrl").title = url;
   $("#hsTabs").innerHTML = (s.tabs || []).length > 1 ? s.tabs.map((t) =>
     `<button class="hs-tab${t.id === s.current ? " on" : ""}" data-tab="${esc(t.id)}" title="${esc(t.url)}">${esc((t.title || t.url).slice(0, 40))}</button>`).join("") : "";
-  $("#hsSignIn").hidden = !!s.signin_open;
+  $("#hsSignIn").hidden = !!s.signin_open || s.logged_in === true;
+  $("#hsBadge").hidden = !!s.signin_open || s.logged_in !== true;
   $("#hsDone").hidden = $("#hsPop").hidden = !s.signin_open;
   $("#hsSignIn").disabled = !!s.busy;
   $("#hsBack").disabled = $("#hsReload").disabled = !s.can_control;
@@ -755,6 +797,7 @@ render.handshake = async () => {
         <button class="btn small" id="hsBack" title="Back">&#8592; Back</button>
         <button class="btn small" id="hsReload" title="Reload">Reload</button>
         <div class="hs-url" id="hsUrl"></div>
+        <span class="hs-confirmed" id="hsBadge" hidden title="Confirmed with the agent's browser">Signed in</span>
         <button class="btn small primary" id="hsSignIn">Sign in to Handshake</button>
         <button class="btn small green" id="hsDone" hidden>Done signing in</button>
         <button class="btn small" id="hsPop" hidden title="Bring the sign-in window onto your screen (for a passkey or file prompt)">Pop out</button>
@@ -787,7 +830,9 @@ render.handshake = async () => {
   });
   $("#hsSignIn").addEventListener("click", (e) => signIn(e.currentTarget));
   $("#hsDone").addEventListener("click", (e) => withBusy(e.currentTarget, "Checking sign-in…", async () => {
-    const r = await post("/api/handshake/login/done"); toast(r.message, r.ok); showNext(r); refreshChrome();
+    const r = await post("/api/handshake/login/done"); showNext(r); refreshChrome();
+    if (r.logged_in) notice("Signed in to Handshake", "Confirmed with the agent's browser. You're ready to apply."); else toast(r.message, false);
+    liveChrome(await api("/api/live/status"));
   }));
   if (live.autoSignIn) { live.autoSignIn = false; if (!s.signin_open && !s.busy) signIn($("#hsSignIn")); }
   $("#hsPop").addEventListener("click", (e) => withBusy(e.currentTarget, "Opening…", async () => { const r = await post("/api/handshake/popout"); toast(r.message, r.ok); }));

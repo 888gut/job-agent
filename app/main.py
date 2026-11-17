@@ -547,7 +547,14 @@ async def connections():
         "storage": {"connected": google_store.is_connected("storage"), "email": storage_email,
                     "sheet_url": google_store.sheet_url()},
         "handshake_gmail": {"connected": google_store.is_connected("handshake_gmail"), "email": gmail_email},
+        "handshake": _hs_login_info(),
     }
+
+
+def _hs_login_info() -> dict:
+    st = get_settings()
+    return {"logged_in": st.get("hs_logged_in"), "checked_at": st.get("hs_checked_at"),
+            "signin_open": handshake.login_open()}
 
 
 @app.post("/api/connect/{account}")
@@ -603,6 +610,7 @@ async def handshake_login_done():
         ok = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.is_logged_in)), timeout=90)
     except Exception:
         ok = False
+    pipeline.record_handshake_login(ok)
     if ok:
         return {"ok": True, "logged_in": True, "message": "You're signed in to Handshake. The agent can apply now."}
     return {"ok": False, "logged_in": False,
@@ -627,7 +635,8 @@ def _agent_busy() -> str:
 async def live_status():
     info = await asyncio.to_thread(live.status)
     busy = _agent_busy()
-    return {**info, "signin_open": handshake.login_open(), "busy": busy, "can_control": bool(info["open"]) and not busy}
+    return {**info, "signin_open": handshake.login_open(), "busy": busy, "can_control": bool(info["open"]) and not busy,
+            "logged_in": get_settings().get("hs_logged_in")}
 
 
 @app.get("/api/live/frame")
@@ -672,11 +681,16 @@ async def live_input(request: Request):
 
 @app.get("/api/handshake/status")
 async def handshake_status():
+    """Confirm the Handshake sign-in with the agent's own browser. While the agent is busy or the
+    sign-in window is open, answer with the last confirmed result instead of interrupting."""
+    if _agent_busy() or handshake.login_open():
+        return {**_hs_login_info(), "checked": False}
     try:
-        ok = await asyncio.wrap_future(handshake.run(handshake.is_logged_in))
-        return {"logged_in": ok}
+        ok = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.is_logged_in)), timeout=90)
     except Exception as e:
-        return {"logged_in": False, "error": str(e)}
+        return {**_hs_login_info(), "checked": False, "error": str(e)}
+    pipeline.record_handshake_login(ok)
+    return {**_hs_login_info(), "checked": True}
 
 
 @app.post("/api/gmail/check")
