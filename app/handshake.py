@@ -3,8 +3,8 @@
 All Playwright calls run on ONE dedicated thread (sync Playwright objects must stay on the
 thread that created them). Use `run(fn, *args)` from anywhere to execute on that thread.
 
-The agent never types passwords: you sign in yourself once in the window it opens, and the
-session is kept in data/browser_profile. If Handshake shows a CAPTCHA, a sign-in page or a
+The agent never types passwords: you sign in yourself, from the dashboard's Handshake tab (a live
+view of the off-screen sign-in window), and the session is kept in data/browser_profile. If Handshake shows a CAPTCHA, a sign-in page or a
 form the agent doesn't understand, it stops and hands the job to you.
 """
 import random
@@ -18,6 +18,15 @@ from urllib.parse import quote_plus
 from .config import BROWSER_PROFILE, HANDSHAKE_BASE
 
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="handshake")
+
+# Both Chrome windows run off-screen with the DevTools port open on 127.0.0.1 only, so the
+# dashboard's Handshake tab can show them live (see live.py). The other flags keep an off-screen
+# window drawing normally instead of being paused as "hidden".
+DEBUG_PORT = 9333
+VIEW_FLAGS = [f"--remote-debugging-port={DEBUG_PORT}", "--remote-debugging-address=127.0.0.1",
+              "--window-position=-32000,-32000", "--window-size=1280,900",
+              "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
+              "--disable-background-timer-throttling", "--disable-features=CalculateNativeWinOcclusion"]
 _state: dict = {"pw": None, "ctx": None}
 
 JOB_ID_RX = re.compile(r"/(?:job-search|jobs|postings)/(\d{4,})")
@@ -27,7 +36,7 @@ SUCCESS_RX = re.compile(r"application (was )?(submitted|sent)|you applied|succes
 
 @dataclass
 class ApplyResult:
-    status: str          # applied | ready | needs_manual | failed
+    status: str          # applied | ready | needs_manual | blocked (CAPTCHA/sign-in: stop the whole run)
     note: str = ""
 
 
@@ -54,7 +63,7 @@ def _pause(lo: float = 2.0, hi: float = 5.0) -> None:
 def _context():
     proc = _manual.get("proc")
     if proc is not None and proc.poll() is None:
-        raise RuntimeError("Close the Handshake sign-in window first; the agent can't use the browser while it's open.")
+        raise RuntimeError("Finish signing in first (Handshake tab > Done signing in); the agent can't use the browser while the sign-in window is open.")
     ctx = _state["ctx"]
     if ctx is not None:
         try:
@@ -75,7 +84,7 @@ def _context():
             # stopped by Handshake's bot check, and we don't try to get around that check.)
             ctx = _state["pw"].chromium.launch_persistent_context(
                 str(BROWSER_PROFILE), channel=channel, headless=False, viewport={"width": 1280, "height": 900},
-                args=["--window-position=-32000,-32000", "--window-size=1280,900"],
+                args=VIEW_FLAGS,
             )
             ctx.on("close", lambda *_: _state.update(ctx=None))  # you closed the window -> reopen next time
             _state["ctx"] = ctx
@@ -93,6 +102,34 @@ def _page():
         except Exception:
             _state["ctx"] = None  # the window was closed; open a fresh one
     raise RuntimeError("Couldn't open the Handshake browser window.")
+
+
+# Counts required questions left unanswered inside the application dialog: text boxes, dropdowns,
+# checkboxes, radio groups, and custom widgets marked aria-required. Anything required that we
+# didn't fill means the form needs a human.
+UNANSWERED_JS = """(root) => {
+  let n = 0;
+  const seenRadio = new Set();
+  for (const el of root.querySelectorAll('[required], [aria-required="true"]')) {
+    const tag = el.tagName.toLowerCase(), type = (el.getAttribute('type') || '').toLowerCase();
+    if (type === 'file' || type === 'hidden' || el.disabled) continue;
+    if (type === 'checkbox') { if (!el.checked) n++; continue; }
+    if (type === 'radio') {
+      const name = el.name || el.id;
+      if (seenRadio.has(name)) continue;
+      seenRadio.add(name);
+      const group = el.name ? root.querySelectorAll('input[type=radio][name="' + CSS.escape(el.name) + '"]') : [el];
+      if (![...group].some(r => r.checked)) n++;
+      continue;
+    }
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') { if (!String(el.value || '').trim()) n++; continue; }
+    // custom widget (role=combobox/radiogroup/etc.) marked aria-required
+    const picked = el.querySelector('[aria-checked="true"], [aria-selected="true"], input:checked');
+    const text = (el.getAttribute('aria-valuetext') || el.value || el.textContent || '').trim();
+    if (!picked && (!text || /^(select|choose|--)/i.test(text))) n++;
+  }
+  return n;
+}"""
 
 
 def _blocker(page) -> str | None:
@@ -264,6 +301,7 @@ def open_login() -> str:
     import subprocess
 
     close()  # the profile can only be open in one Chrome at a time
+    _quit_any_browser()
     exe = _chrome_exe()
     if not exe:
         raise RuntimeError("Google Chrome wasn't found on this PC.")
@@ -273,10 +311,77 @@ def open_login() -> str:
     _label_profile()
     _manual["proc"] = subprocess.Popen([
         exe, f"--user-data-dir={BROWSER_PROFILE}", "--no-first-run", "--no-default-browser-check",
-        "--start-maximized", "--new-window", f"{HANDSHAKE_BASE}/login",
+        *VIEW_FLAGS, "--new-window", f"{HANDSHAKE_BASE}/login",
     ])
-    _show_on_main_screen(_manual["proc"].pid)
-    return "Opened Handshake in Chrome's \"Job Agent\" profile. Sign in there if asked, then close that window."
+    return "Handshake's sign-in is open below. Sign in, then click Done signing in."
+
+
+def _browser_ws() -> str | None:
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{DEBUG_PORT}/json/version", timeout=1.5) as r:
+            return json.load(r)["webSocketDebuggerUrl"]
+    except Exception:
+        return None
+
+
+def _quit_any_browser(wait: float = 15.0) -> None:
+    """Make sure no Chrome is still using the agent's profile (one may be mid-shutdown). A new
+    window started while one is still running just joins it, which breaks the sign-in window."""
+    import json
+
+    end = time.time() + wait
+    asked = False
+    while time.time() < end:
+        ws_url = _browser_ws()
+        if not ws_url:
+            time.sleep(0.5)          # let Chrome release the profile lock
+            return
+        if not asked or time.time() > end - wait / 2:
+            try:
+                from websockets.sync.client import connect
+
+                with connect(ws_url, open_timeout=3) as ws:
+                    ws.send(json.dumps({"id": 1, "method": "Browser.close"}))
+                asked = True
+            except Exception:
+                pass
+        time.sleep(0.5)
+    raise RuntimeError("The agent's browser didn't close in time. Try Sign in to Handshake again in a moment.")
+
+
+def login_open() -> bool:
+    proc = _manual.get("proc")
+    return proc is not None and proc.poll() is None
+
+
+def finish_login() -> str:
+    """Close the sign-in window the normal way (so Chrome saves the session), then let the agent
+    use the profile again."""
+    proc = _manual.get("proc")
+    try:  # ask Chrome to quit cleanly, like closing the window, so it saves the session
+        _quit_any_browser()
+    except Exception:
+        pass
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.terminate()
+    _manual["proc"] = None
+    return "Signed-in session saved. The agent can use Handshake again."
+
+
+def pop_out() -> str:
+    """Bring the sign-in window onto your screen, for anything the live view can't do (a passkey
+    prompt, a file picker)."""
+    proc = _manual.get("proc")
+    if proc is None or proc.poll() is not None:
+        return "The sign-in window isn't open."
+    _show_on_main_screen(proc.pid)
+    return "The sign-in window is on your screen now. Click Done signing in here when you're finished."
 
 
 def is_logged_in() -> bool:
@@ -369,7 +474,7 @@ def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | N
     page.goto(url, wait_until="domcontentloaded")
     _pause(3, 5)
     if (b := _blocker(page)):
-        return ApplyResult("needs_manual", b)
+        return ApplyResult("blocked", b)
 
     buttons = page.get_by_role("button", name=APPLY_BTN_RX)
     if buttons.count() == 0:
@@ -383,7 +488,7 @@ def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | N
     buttons.first.click()
     _pause(2, 4)
     if (b := _blocker(page)):
-        return ApplyResult("needs_manual", b)
+        return ApplyResult("blocked", b)
 
     dialog = page.get_by_role("dialog")
     if dialog.count() == 0:
@@ -413,15 +518,12 @@ def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | N
     _pause(1.5, 2.5)
 
     # Extra required questions/documents we can't answer safely -> hand off to you.
-    empty_required = scope.locator(
-        "textarea[required], input[required]:not([type=file]):not([type=hidden]), select[required]"
-    )
-    for i in range(empty_required.count()):
-        try:
-            if not empty_required.nth(i).input_value().strip():
-                return ApplyResult("needs_manual", "The form has extra required questions. Open the posting and apply yourself (the tailored resume is ready to download).")
-        except Exception:
-            continue
+    try:
+        unanswered = scope.evaluate(UNANSWERED_JS)
+    except Exception:
+        unanswered = -1  # couldn't check: don't guess
+    if unanswered:
+        return ApplyResult("needs_manual", "The form has extra required questions. Open the posting and apply yourself (the tailored resume is ready to download).")
     if scope.locator("input[type=file]").count() > 1:
         return ApplyResult("needs_manual", "The form asks for more documents (e.g. transcript or cover letter).")
 
@@ -434,7 +536,7 @@ def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | N
     submit.first.click()
     _pause(4, 6)
     if (b := _blocker(page)):
-        return ApplyResult("needs_manual", b)
+        return ApplyResult("blocked", f"{b} It may or may not have been submitted. Check this job on Handshake.")
     if SUCCESS_RX.search(page.inner_text("body")[:10000]):
         return ApplyResult("applied", "Submitted on Handshake.")
     # Check the posting itself: once applied, Handshake swaps the Apply button for an Applied state.

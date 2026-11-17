@@ -2,7 +2,7 @@
 const $ = (s, el = document) => el.querySelector(s);
 const view = $("#view");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const PAGES = { overview: "Overview", queue: "Approval Queue", applications: "Applications", resumes: "Resumes & Transcript", facts: "Career Facts", github: "GitHub", settings: "Settings", activity: "Activity Log" };
+const PAGES = { overview: "Overview", queue: "Approval Queue", applications: "Applications", resumes: "Resumes & Transcript", facts: "Career Facts", github: "GitHub", handshake: "Handshake", settings: "Settings", activity: "Activity Log" };
 let currentPage = "overview";
 let pollTimer = null;
 
@@ -661,7 +661,7 @@ render.settings = async () => {
     refreshChrome();
   });
   $("#loadDemo").onclick = (e) => withBusy(e.currentTarget, "Loading…", async () => { await post("/api/demo/load"); toast("Sample data loaded."); refreshChrome(); });
-  $("#hsLogin")?.addEventListener("click", (e) => withBusy(e.currentTarget, "Opening…", async () => { const r = await post("/api/handshake/login"); toast(r.message, r.ok); }));
+  $("#hsLogin")?.addEventListener("click", () => { live.autoSignIn = true; location.hash = "#/handshake"; });
   $("#hsCheck")?.addEventListener("click", (e) => {
     const btn = e.currentTarget;
     return withBusy(btn, "Checking…", async () => {
@@ -684,6 +684,137 @@ render.settings = async () => {
       render.settings();
     }
   });
+};
+
+// ---------- Handshake tab: live view of the agent's browser ----------
+// The agent's Chrome runs off-screen. This page shows it a few times a second and, when the agent
+// isn't busy, passes your clicks, scrolling and typing through to it (for signing in, mostly).
+const live = { st: null, loop: 0, queue: Promise.resolve(), text: "", textTimer: null, warned: 0, autoSignIn: false, done: null };
+
+function liveSend(ev) {
+  live.queue = live.queue.then(() => post("/api/live/input", JSON.stringify(ev))).catch((e) => {
+    if (Date.now() - live.warned > 4000) { live.warned = Date.now(); toast(e.message, false); }
+  });
+  return live.queue;
+}
+function liveFlushText() { clearTimeout(live.textTimer); if (live.text) { const t = live.text; live.text = ""; liveSend({ kind: "text", text: t }); } }
+const LIVE_KEYS = new Set(["Enter", "Backspace", "Tab", "Escape", "Delete", "Home", "End", "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "PageUp", "PageDown"]);
+
+function liveStateLine(s) {
+  if (!s.open) return `<span class="hs-dot off"></span>No Handshake browser is open. The agent opens one when it searches or applies.`;
+  if (s.signin_open) return `<span class="hs-dot on"></span><b>Sign-in window</b> · click the page and sign in as usual, then click Done signing in.`;
+  if (s.busy) return `<span class="hs-dot busy"></span><b>Agent at work</b> · ${esc(s.busy)}. You can watch; clicks are paused until it finishes.`;
+  return `<span class="hs-dot on"></span><b>Agent's browser</b> · idle. You can click around if you need to.`;
+}
+
+function liveChrome(s) {
+  live.st = s;
+  const dot = $("#hsTopDot");
+  if (dot) { dot.hidden = !(s.signin_open || s.busy); dot.className = "hs-top-dot" + (s.busy ? " busy" : ""); }
+  if (!$("#hsLine")) return;
+  $("#hsLine").innerHTML = liveStateLine(s);
+  const url = s.open ? (s.url || "") : "";
+  $("#hsUrl").textContent = url; $("#hsUrl").title = url;
+  $("#hsTabs").innerHTML = (s.tabs || []).length > 1 ? s.tabs.map((t) =>
+    `<button class="hs-tab${t.id === s.current ? " on" : ""}" data-tab="${esc(t.id)}" title="${esc(t.url)}">${esc((t.title || t.url).slice(0, 40))}</button>`).join("") : "";
+  $("#hsSignIn").hidden = !!s.signin_open;
+  $("#hsDone").hidden = $("#hsPop").hidden = !s.signin_open;
+  $("#hsSignIn").disabled = !!s.busy;
+  $("#hsBack").disabled = $("#hsReload").disabled = !s.can_control;
+  $("#hsScreen").classList.toggle("view-only", !s.can_control);
+  $("#hsEmpty").hidden = !!s.open;
+  $("#hsImg").hidden = !s.open;
+}
+
+async function liveRun(id) {
+  let lastStatus = 0;
+  while (live.loop === id && currentPage === "handshake") {
+    if (document.hidden) { await new Promise((r) => setTimeout(r, 800)); continue; }
+    try {
+      if (Date.now() - lastStatus > 1500) { lastStatus = Date.now(); liveChrome(await api("/api/live/status")); }
+      if (live.st?.open) {
+        const res = await fetch("/api/live/frame", { cache: "no-store" });
+        if (res.status === 200) {
+          const url = URL.createObjectURL(await res.blob());
+          const img = $("#hsImg");
+          if (img && live.loop === id) { const old = img.src; img.src = url; if (old.startsWith("blob:")) URL.revokeObjectURL(old); }
+          else URL.revokeObjectURL(url);
+        } else if (res.status === 204) lastStatus = 0;  // the browser just closed: refresh the status line
+      }
+    } catch { /* server restarting: keep trying */ }
+    await new Promise((r) => setTimeout(r, live.st?.open ? 300 : 1500));
+  }
+}
+
+render.handshake = async () => {
+  const s = await api("/api/live/status");
+  view.innerHTML = `<h1>Handshake</h1>
+    <p class="subtitle">A live view of the agent's own Chrome, which runs out of sight. Sign in here, or watch what it's doing.</p>
+    <div class="panel hs-live">
+      <div class="hs-bar">
+        <button class="btn small" id="hsBack" title="Back">&#8592; Back</button>
+        <button class="btn small" id="hsReload" title="Reload">Reload</button>
+        <div class="hs-url" id="hsUrl"></div>
+        <button class="btn small primary" id="hsSignIn">Sign in to Handshake</button>
+        <button class="btn small green" id="hsDone" hidden>Done signing in</button>
+        <button class="btn small" id="hsPop" hidden title="Bring the sign-in window onto your screen (for a passkey or file prompt)">Pop out</button>
+      </div>
+      <div class="hs-tabs" id="hsTabs"></div>
+      <div class="hs-screen" id="hsScreen" tabindex="0" aria-label="Live Handshake browser. Click to focus, then type.">
+        <img id="hsImg" alt="Live view of the Handshake browser" draggable="false">
+        <div class="hs-empty" id="hsEmpty"><div class="big">Nothing open right now</div>Click <b>Sign in to Handshake</b> to sign in, or start a search and watch it here.</div>
+      </div>
+      <div class="hs-foot" id="hsLine"></div>
+    </div>
+    <div class="hs-next" id="hsNext" hidden></div>
+    <p class="hint">What you type goes straight to the Handshake page. The dashboard doesn't save or log it.</p>`;
+  liveChrome(s);
+  const showNext = (r) => {
+    live.done = r;
+    $("#hsNext").hidden = false;
+    $("#hsNext").className = "hs-next " + (r.logged_in ? "ok" : "warn");
+    $("#hsNext").innerHTML = r.logged_in
+      ? `<b>Signed in to Handshake.</b> Pick jobs in the Approval Queue and click Start to apply.<button class="btn small green" id="hsGoQueue">Go to Approval Queue</button>`
+      : `<b>Not signed in yet.</b> ${esc(r.message)}`;
+    $("#hsGoQueue")?.addEventListener("click", () => { location.hash = "#/queue"; });
+  };
+  if (live.done) showNext(live.done);
+
+  const signIn = (btn) => withBusy(btn, "Opening…", async () => {
+    live.done = null; $("#hsNext").hidden = true;
+    const r = await post("/api/handshake/login"); toast(r.message, r.ok);
+    liveChrome(await api("/api/live/status")); $("#hsScreen").focus();
+  });
+  $("#hsSignIn").addEventListener("click", (e) => signIn(e.currentTarget));
+  $("#hsDone").addEventListener("click", (e) => withBusy(e.currentTarget, "Checking sign-in…", async () => {
+    const r = await post("/api/handshake/login/done"); toast(r.message, r.ok); showNext(r); refreshChrome();
+  }));
+  if (live.autoSignIn) { live.autoSignIn = false; if (!s.signin_open && !s.busy) signIn($("#hsSignIn")); }
+  $("#hsPop").addEventListener("click", (e) => withBusy(e.currentTarget, "Opening…", async () => { const r = await post("/api/handshake/popout"); toast(r.message, r.ok); }));
+  $("#hsBack").addEventListener("click", () => liveSend({ kind: "back" }));
+  $("#hsReload").addEventListener("click", () => liveSend({ kind: "reload" }));
+  $("#hsTabs").addEventListener("click", (e) => { const b = e.target.closest("[data-tab]"); if (b) liveSend({ kind: "tab", id: b.dataset.tab }); });
+
+  const screen = $("#hsScreen"), img = $("#hsImg");
+  const at = (e) => { const r = img.getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height }; };
+  img.addEventListener("click", (e) => { screen.focus(); if (!live.st?.can_control) return; liveFlushText(); liveSend({ kind: "click", ...at(e) }); });
+  img.addEventListener("wheel", (e) => {
+    if (!live.st?.can_control) return;
+    e.preventDefault();
+    liveSend({ kind: "scroll", ...at(e), dy: e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY });
+  }, { passive: false });
+  screen.addEventListener("keydown", (e) => {
+    if (!live.st?.can_control || e.ctrlKey || e.metaKey || e.altKey) return;  // Ctrl+V reaches the paste handler
+    if (e.key.length === 1) { e.preventDefault(); live.text += e.key; clearTimeout(live.textTimer); live.textTimer = setTimeout(liveFlushText, 60); }
+    else if (LIVE_KEYS.has(e.key)) { e.preventDefault(); liveFlushText(); liveSend({ kind: "key", key: e.key, shift: e.shiftKey }); }
+  });
+  screen.addEventListener("paste", (e) => {
+    if (!live.st?.can_control) return;
+    e.preventDefault(); liveFlushText();
+    liveSend({ kind: "text", text: e.clipboardData.getData("text") });
+  });
+
+  liveRun(++live.loop);
 };
 
 render.activity = async () => {
@@ -727,6 +858,59 @@ render.github = async () => {
   });
 };
 
+// ---------- movable window ----------
+// Drag the title bar to move the dashboard window around the browser; drag its bottom-right corner
+// to resize it. Double-click the title bar to put it back. Remembered in this browser only.
+(function movableWindow() {
+  const win = document.querySelector(".window"), bar = win?.querySelector(".titlebar");
+  if (!win || !bar) return;
+  const KEY = "jobAgentWindow";
+  const wide = () => matchMedia("(min-width: 761px)").matches;
+  let pos = { x: 0, y: 0, w: 0, h: 0 };
+  try { pos = { ...pos, ...JSON.parse(localStorage.getItem(KEY) || "{}") }; } catch {}
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(pos)); } catch {} };
+  const clamp = () => {  // keep the title bar reachable
+    const r = win.getBoundingClientRect(), baseX = r.left - pos.x, baseY = r.top - pos.y;
+    pos.x = Math.min(Math.max(pos.x, 80 - baseX - r.width), innerWidth - 80 - baseX);
+    pos.y = Math.min(Math.max(pos.y, -baseY), innerHeight - 40 - baseY);
+  };
+  const apply = () => {
+    if (!wide()) { win.style.transform = win.style.width = win.style.height = ""; win.classList.remove("moved"); return; }
+    win.style.transform = pos.x || pos.y ? `translate(${pos.x}px, ${pos.y}px)` : "";
+    win.style.width = pos.w ? pos.w + "px" : "";
+    win.style.height = pos.h ? pos.h + "px" : "";
+    win.classList.toggle("moved", !!(pos.x || pos.y || pos.w || pos.h));
+  };
+  apply();
+  addEventListener("resize", apply);
+  bar.addEventListener("pointerdown", (e) => {
+    if (!wide() || e.button !== 0 || e.target.closest("button, a, input")) return;
+    e.preventDefault();
+    const sx = e.clientX - pos.x, sy = e.clientY - pos.y;
+    bar.setPointerCapture(e.pointerId);
+    win.classList.add("dragging");
+    const move = (ev) => { pos.x = ev.clientX - sx; pos.y = ev.clientY - sy; clamp(); apply(); };
+    const up = () => { bar.removeEventListener("pointermove", move); win.classList.remove("dragging"); save(); };
+    bar.addEventListener("pointermove", move);
+    bar.addEventListener("pointerup", up, { once: true });
+    bar.addEventListener("pointercancel", up, { once: true });
+  });
+  bar.addEventListener("dblclick", (e) => {
+    if (e.target.closest("button")) return;
+    pos = { x: 0, y: 0, w: 0, h: 0 }; save(); apply();
+  });
+  // native corner-resize: remember the size the user drags it to
+  let t;
+  new ResizeObserver(() => {
+    if (!wide() || !win.classList.contains("resizing")) return;
+    clearTimeout(t); t = setTimeout(() => { pos.w = win.offsetWidth; pos.h = win.offsetHeight; save(); win.classList.toggle("moved", true); }, 150);
+  }).observe(win);
+  win.addEventListener("pointerdown", (e) => {  // only count size changes that start at the corner grip
+    const r = win.getBoundingClientRect();
+    if (e.clientX > r.right - 18 && e.clientY > r.bottom - 18) { win.classList.add("resizing"); addEventListener("pointerup", () => setTimeout(() => win.classList.remove("resizing"), 300), { once: true }); }
+  });
+})();
+
 // ---------- router ----------
 let routeSeq = 0, lastPage = null;
 async function route() {
@@ -752,5 +936,6 @@ route();
 clearInterval(pollTimer);
 pollTimer = setInterval(() => {
   refreshChrome();
+  if (currentPage !== "handshake") api("/api/live/status").then((s) => { live.st = s; liveChrome(s); }).catch(() => {});
   if (currentPage === "activity") render.activity().catch(() => {});
 }, 6000);

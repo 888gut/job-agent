@@ -6,7 +6,8 @@ if not exist .venv (
   python -m venv .venv
   .venv\Scripts\python.exe -m pip install -r requirements.txt
   .venv\Scripts\python.exe -m playwright install chromium
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install-desktop-icon.ps1"
 )
 if not exist .env copy .env.example .env >nul
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\server.ps1" start
-start "" http://127.0.0.1:8765
+rem Same as the desktop icon: run the latest code (restarting if it changed) and open the dashboard.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\server.ps1" open

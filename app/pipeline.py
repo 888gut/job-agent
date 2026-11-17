@@ -6,6 +6,8 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pymupdf
@@ -31,7 +33,8 @@ def current_resumes() -> dict[str, Resume]:
 
 
 def applied_today() -> int:
-    start = now().replace(hour=0, minute=0, second=0, microsecond=0)
+    # "Today" is your local day (midnight to midnight on this computer), not UTC.
+    start = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     with session() as s:
         return s.exec(
             select(func.count()).select_from(Application)
@@ -540,6 +543,13 @@ def approve(job_id: int) -> dict:
     log(f"Applying to {job.title} at {job.company}{' (dry run)' if settings['dry_run'] else ''}", "info", job_id)
     try:
         result = _hs(handshake.apply, job.url, pdf, bool(settings["dry_run"]), upload_name_for(job))
+    except FutureTimeout:
+        # The browser may still be mid-application (it could even click Submit), so this is never a
+        # plain failure: hand it to you to check, and stop any batch run.
+        msg = "This took too long, so the agent stopped waiting. It may have been submitted: check this job on Handshake before trying again."
+        _set_status(job_id, "needs_manual", msg)
+        log(f"{job.company}: {msg}", "warn", job_id)
+        return {"ok": False, "message": msg, "blocked": True}
     except Exception as e:
         _set_status(job_id, "failed", str(e))
         log(f"Apply failed for {job.company}: {e}", "error", job_id)
@@ -552,7 +562,7 @@ def approve(job_id: int) -> dict:
     if result.status != "applied":
         _set_status(job_id, "needs_manual", result.note)
         log(f"{job.company}: {result.note}", "warn", job_id)
-        return {"ok": result.status == "ready", "message": result.note}
+        return {"ok": False, "message": result.note, "blocked": result.status == "blocked"}
 
     _set_status(job_id, "applied", result.note)
     record_application(job_id)
@@ -595,6 +605,10 @@ def apply_batch(job_ids: list[int]) -> None:
                                      "ok": res["ok"], "message": res["message"]})
             batch["done"] = i + 1
             if "Daily cap" in res["message"]:
+                break
+            if res.get("blocked"):
+                log("Stopping this run: Handshake needs you (a CAPTCHA, a sign-in, or a job to check). "
+                    "Sort that out, then start again.", "warn")
                 break
             if i < len(job_ids) - 1:
                 batch["current"] = "Pausing between applications"

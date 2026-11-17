@@ -6,7 +6,7 @@
   <title>Job Agent</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%2398d4ff'/%3E%3Cstop offset='1' stop-color='%231c5aa3'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='3' y='9' width='26' height='19' rx='3' fill='url(%23g)'/%3E%3Cpath d='M11 9V6a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v3' fill='none' stroke='%231c5aa3' stroke-width='2.5'/%3E%3C/svg%3E">
   <script>try { if (localStorage.getItem("theme") === "dark") document.documentElement.dataset.theme = "dark"; } catch (e) {}</script>
-  <link rel="stylesheet" href="vista.css?v=11">
+  <link rel="stylesheet" href="vista.css?v=14">
 </head>
 <body>
   <!-- inline SVG icon sprite -->
@@ -19,6 +19,7 @@
       <linearGradient id="gPurple" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e2c4fb"/><stop offset="1" stop-color="#7b48a8"/></linearGradient>
     </defs>
     <symbol id="i-briefcase" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2.5" fill="url(#gBlue)" stroke="#1a4f8c"/><path d="M8.5 7V5.2A1.7 1.7 0 0 1 10.2 3.5h3.6a1.7 1.7 0 0 1 1.7 1.7V7" fill="none" stroke="#1a4f8c" stroke-width="1.6"/><rect x="2" y="7" width="20" height="6" rx="2.5" fill="#fff" opacity=".28"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5" fill="url(#gBlue)" stroke="#1a4f8c"/><path d="M2.5 12h19M12 2.5c2.8 2.6 4.2 5.8 4.2 9.5s-1.4 6.9-4.2 9.5c-2.8-2.6-4.2-5.8-4.2-9.5s1.4-6.9 4.2-9.5z" fill="none" stroke="#fff" stroke-width="1.3" opacity=".9"/></symbol>
     <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5V21H3z" fill="url(#gBlue)" stroke="#1a4f8c" stroke-linejoin="round"/><rect x="9.5" y="14" width="5" height="7" fill="#fff" opacity=".8"/></symbol>
     <symbol id="i-queue" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2.5" fill="url(#gAmber)" stroke="#9a6406"/><path d="m7 12.5 3 3 7-7" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-list" viewBox="0 0 24 24"><rect x="3.5" y="2.5" width="17" height="19" rx="2" fill="url(#gGray)" stroke="#5b6a7a"/><path d="M7 8h10M7 12h10M7 16h6" stroke="#2f4a68" stroke-width="1.6" stroke-linecap="round"/></symbol>
@@ -60,6 +61,7 @@
         <button id="runBtn"><svg class="icon" style="width:16px;height:16px" aria-hidden="true"><use href="#i-play"/></svg><span class="lg">Run search now</span><span class="sm">Search</span></button>
         <button class="hide-phone" onclick="location.hash='#/queue'">Review queue</button>
         <button id="gmailBtn" class="gmail-btn" title="Open your Handshake Gmail in a new tab"><svg class="icon" style="width:16px;height:16px" aria-hidden="true" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="2" fill="#fff" stroke="#b3261e"/><path d="m3.5 6.5 8.5 6.5 8.5-6.5" fill="none" stroke="#d93025" stroke-width="2" stroke-linejoin="round"/></svg><span class="lg">Open Gmail</span><span class="sm">Gmail</span><span class="badge" id="gmailBadge" hidden></span></button>
+        <button id="hsTopBtn" class="hs-top" onclick="location.hash='#/handshake'" title="Watch the agent's Handshake browser and sign in"><svg class="icon" style="width:16px;height:16px" aria-hidden="true"><use href="#i-globe"/></svg><span class="lg">Handshake</span><span class="sm">Handshake</span><span class="hs-top-dot" id="hsTopDot" hidden></span></button>
         <button id="sheetBtn" style="display:none">Open Google Sheet</button>
         <div class="spacer"></div>
         <span class="status-text" id="runStatus" aria-live="polite"></span>
@@ -81,6 +83,7 @@
           <a href="#/github" data-page="github"><svg class="icon"><use href="#i-code"/></svg><span class="lg">GitHub</span><span class="sm">GitHub</span></a>
           <div class="divider"></div>
           <h4>Agent</h4>
+          <a href="#/handshake" data-page="handshake"><svg class="icon"><use href="#i-globe"/></svg><span class="lg">Handshake</span><span class="sm">Handshake</span></a>
           <a href="#/settings" data-page="settings"><svg class="icon"><use href="#i-gear"/></svg><span class="lg">Settings</span><span class="sm">Settings</span></a>
           <a href="#/activity" data-page="activity"><svg class="icon"><use href="#i-pulse"/></svg><span class="lg">Activity Log</span><span class="sm">Activity</span></a>
         </nav>
@@ -107,6 +110,6 @@
   </div>
   <div class="toast" id="toast" role="status"></div>
 
-  <script src="app.js?v=9"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

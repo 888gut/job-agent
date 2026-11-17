@@ -3,7 +3,9 @@
 A local agent that finds Handshake jobs, matches them to your two resumes, tailors a resume when a job sits a bit outside them, and waits for your one-click approval before it applies. Every application is logged to a Google Sheet in your storage Gmail account.
 
 ## 1. Start it
-Double-click **`start.bat`**. The first run installs everything, then the dashboard opens at <http://127.0.0.1:8765>.
+Double-click **`start.bat`**. The first run installs everything, puts a **Job Agent** icon on your desktop and in the Start menu, then opens the dashboard at <http://127.0.0.1:8765>.
+
+After that, just use the **Job Agent** icon. It always runs the latest code in this folder: if the code changed since the server started, it restarts it first (never in the middle of a search or an application run), then opens the dashboard in Chrome. To add the icon again (say, after moving the folder), run `powershell -ExecutionPolicy Bypass -File scripts\install-desktop-icon.ps1`.
 Until you clear it, the dashboard shows **sample data**. Use the yellow bar to clear it.
 
 ## 2. Claude API key
@@ -25,8 +27,10 @@ This lets the agent use **your own** Google project. You'll sign in on Google's 
   "Job Agent - Applications" Sheet and a "Job Agent Resumes" Drive folder there.
 - **Handshake Gmail → Connect** (optional): pick the *Handshake* account. This gives read-only access so
   Handshake emails can mark applications Confirmed, Interview or Rejected.
-- **Sign in to Handshake**: a separate Chrome window opens. Sign in there however you normally do
-  (school SSO, Google, etc.). The session is remembered in `data/browser_profile`.
+- **Sign in to Handshake**: the dashboard's **Handshake** tab opens with a live view of the agent's
+  browser, and your Handshake Gmail address is filled in for you. Finish signing in there however you
+  normally do (school SSO, Google, etc.), then click **Done signing in**. The session is remembered in
+  `data/browser_profile`. The same tab lets you watch the agent while it searches and applies.
 
 ## 5. Upload your resumes (Resumes page)
 Upload Resume A and Resume B as PDFs. These two **base resumes are never edited**; jobs that fit well get your original PDF, byte for byte.

@@ -63,7 +63,8 @@ function Open-Dashboard {
     $p = Get-Server
     if ($p -and (Test-CodeChanged $p) -and -not (Test-Busy)) { Stop-Server | Out-Null; $p = $null }
     if (-not $p) { Start-Server | Out-Null }
-    $url = "http://127.0.0.1:8765"
+    # A fresh address on every launch, so Chrome can never show an old saved copy of the dashboard.
+    $url = "http://127.0.0.1:8765/?launch=$([DateTimeOffset]::Now.ToUnixTimeSeconds())"
     $chrome = @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
                 "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
                 "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1

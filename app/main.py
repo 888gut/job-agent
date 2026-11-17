@@ -8,12 +8,12 @@ from datetime import timedelta
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import func, select
 
-from . import demo, facts, gmail_watch, google_store, handshake, layout, pipeline
+from . import demo, facts, gmail_watch, google_store, handshake, layout, live, pipeline
 from .config import GOOGLE_CLIENT_FILE, MASTERS, RESUMES, WEB
 from .db import (Application, Job, LogEvent, ProfileFact, Resume, TailoredResume, get_settings, init_db, log,
                  now, save_settings, session)
@@ -44,6 +44,12 @@ def _gmail_tick() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    with session() as s:  # the app stopped mid-application last time: never assume either way
+        for j in s.exec(select(Job).where(Job.status == "applying")):
+            j.status = "needs_manual"
+            j.note = "The app stopped in the middle of applying. Check this job on Handshake before trying again."
+            s.add(j)
+        s.commit()
     with session() as s:
         empty = s.exec(select(Job.id)).first() is None
     if empty and not get_settings().get("demo_seen"):
@@ -91,6 +97,8 @@ async def local_only(request, call_next):
         if request.headers.get("sec-fetch-site") == "cross-site":
             return JSONResponse({"detail": "Requests from other websites are not allowed."}, status_code=403)
     response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache"   # always pick up dashboard updates (no stale styles)
     response.headers["X-Frame-Options"] = "DENY"            # can't be embedded in another site
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -575,11 +583,91 @@ async def handshake_login():
     if pipeline.batch["running"] or pipeline.state["running"]:
         return {"ok": False, "message": "The agent is busy using Handshake right now. Sign in after it finishes (or click Stop)."}
     try:
-        msg = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.open_login)), timeout=90)
-        return {"ok": True, "message": msg}
+        await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.open_login)), timeout=90)
+        email = get_settings().get("gmail_email") or ""
+        if email:  # fill in your Handshake email on the sign-in page; the password/Google step stays yours
+            asyncio.get_running_loop().run_in_executor(None, live.prefill_email, email)
+            msg = f"Handshake's sign-in is open below. If it asks for your email, {email} is filled in for you. Finish signing in, then click Done signing in."
+        else:
+            msg = "Handshake's sign-in is open below. Sign in, then click Done signing in."
+        return {"ok": True, "message": msg, "email": email}
     except Exception as e:
         log(f"Couldn't open the Handshake browser: {e}", "error")
         return {"ok": False, "message": str(e)}
+
+
+@app.post("/api/handshake/login/done")
+async def handshake_login_done():
+    await asyncio.to_thread(handshake.finish_login)
+    try:  # check with the agent's own browser that the session really took
+        ok = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.is_logged_in)), timeout=90)
+    except Exception:
+        ok = False
+    if ok:
+        return {"ok": True, "logged_in": True, "message": "You're signed in to Handshake. The agent can apply now."}
+    return {"ok": False, "logged_in": False,
+            "message": "Handshake still isn't signed in. Click Sign in to Handshake and finish every step before clicking Done."}
+
+
+@app.post("/api/handshake/popout")
+async def handshake_popout():
+    return {"ok": handshake.login_open(), "message": await asyncio.to_thread(handshake.pop_out)}
+
+
+# ---------- Handshake tab: live view of the agent's browser ----------
+def _agent_busy() -> str:
+    if pipeline.batch["running"]:
+        return f"Applying: {pipeline.batch.get('current') or 'starting'}"
+    if pipeline.state["running"]:
+        return pipeline.state.get("stage") or "Searching Handshake"
+    return ""
+
+
+@app.get("/api/live/status")
+async def live_status():
+    info = await asyncio.to_thread(live.status)
+    busy = _agent_busy()
+    return {**info, "signin_open": handshake.login_open(), "busy": busy, "can_control": bool(info["open"]) and not busy}
+
+
+@app.get("/api/live/frame")
+async def live_frame(request: Request):
+    # Only the dashboard itself may read the picture of your browser.
+    if request.headers.get("sec-fetch-site") not in (None, "same-origin", "none"):
+        raise HTTPException(403, "Not allowed.")
+    try:
+        jpg = await asyncio.to_thread(live.frame)
+    except live.NoBrowser:
+        return Response(status_code=204)
+    return Response(jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/live/input")
+async def live_input(request: Request):
+    if (busy := _agent_busy()):
+        raise HTTPException(409, f"The agent is using the browser ({busy}). You can watch, but not click, until it's done.")
+    ev = await request.json()
+    kind = ev.get("kind")
+    try:
+        if kind == "click":
+            await asyncio.to_thread(live.click, float(ev["x"]), float(ev["y"]))
+        elif kind == "scroll":
+            await asyncio.to_thread(live.scroll, float(ev["x"]), float(ev["y"]), float(ev["dy"]))
+        elif kind == "text":
+            await asyncio.to_thread(live.type_text, str(ev.get("text", "")))
+        elif kind == "key":
+            await asyncio.to_thread(live.key, str(ev.get("key", "")), bool(ev.get("shift")))
+        elif kind in ("back", "reload"):
+            await asyncio.to_thread(live.go, kind)
+        elif kind == "tab":
+            live.select(str(ev.get("id", "")))
+        else:
+            raise HTTPException(400, "Unknown input.")
+    except live.NoBrowser:
+        raise HTTPException(409, "No Handshake browser is open right now.")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
 
 
 @app.get("/api/handshake/status")

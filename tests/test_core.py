@@ -567,6 +567,88 @@ def test_dry_run_keeps_job_in_queue_but_real_problems_need_you(monkeypatch, tmp_
         assert s.get(Job, ids[1]).status == "needs_manual"
 
 
+def test_batch_stops_on_captcha_or_timeout(monkeypatch, tmp_path):
+    from concurrent.futures import TimeoutError as FutureTimeout
+
+    from app import handshake, pipeline
+    from app.db import Job, init_db, session
+
+    init_db()
+    with session() as s:
+        jobs = [Job(handshake_id=f"blk{i}", url="u", title="Analyst", company=f"Blk{i}", status="queued") for i in range(4)]
+        s.add_all(jobs)
+        s.commit()
+        ids = [j.id for j in jobs]
+    pdf = tmp_path / "r.pdf"
+    pdf.write_bytes(b"%PDF")
+    monkeypatch.setattr(pipeline, "resume_pdf_for", lambda job: pdf)
+    monkeypatch.setattr(pipeline, "upload_name_for", lambda job: "Resume.pdf")
+    monkeypatch.setattr(pipeline, "applied_today", lambda: 0)
+    monkeypatch.setattr(pipeline, "_sleep_unless_stopped", lambda s: None)
+
+    calls = []
+    def fake_hs(*a, **k):
+        calls.append(1)
+        return handshake.ApplyResult("blocked", "Handshake is showing a CAPTCHA.")
+    monkeypatch.setattr(pipeline, "_hs", fake_hs)
+    pipeline.apply_batch(ids[:2])
+    assert len(calls) == 1                                    # stopped after the first CAPTCHA
+    with session() as s:
+        assert s.get(Job, ids[0]).status == "needs_manual" and s.get(Job, ids[1]).status == "queued"
+
+    def slow_hs(*a, **k):
+        raise FutureTimeout()
+    monkeypatch.setattr(pipeline, "_hs", slow_hs)
+    res = pipeline.approve(ids[2])
+    assert res["blocked"] and "check this job on Handshake" in res["message"]
+    with session() as s:
+        assert s.get(Job, ids[2]).status == "needs_manual"    # never "failed": it may have gone through
+
+
+def test_daily_cap_counts_from_local_midnight():
+    from datetime import datetime, timedelta, timezone
+
+    from app import pipeline
+    from app.db import Application, init_db, session
+
+    init_db()
+    before = pipeline.applied_today()
+    local_midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    with session() as s:
+        s.add(Application(job_id=0, applied_at=(local_midnight + timedelta(minutes=1)).astimezone(timezone.utc)))
+        s.add(Application(job_id=0, applied_at=(local_midnight - timedelta(minutes=1)).astimezone(timezone.utc)))
+        s.commit()
+    assert pipeline.applied_today() == before + 1             # yesterday evening doesn't count today
+
+
+def test_required_question_check_catches_checkboxes_radios_and_dropdowns():
+    from app.handshake import UNANSWERED_JS
+    sync_api = pytest.importorskip("playwright.sync_api")
+    html = """<div id=f>
+      <input required value="Pat">
+      <input type=checkbox required>
+      <input type=radio name=auth required><input type=radio name=auth>
+      <select required><option value="">Select</option><option>Yes</option></select>
+      <div role=combobox aria-required=true>Select an option</div>
+      <input type=file required>
+    </div>"""
+    with sync_api.sync_playwright() as pw:
+        try:
+            browser = pw.chromium.launch(channel="chrome", headless=True)
+        except Exception:
+            pytest.skip("Chrome not available")
+        page = browser.new_page()
+        page.set_content(html)
+        root = page.locator("#f")
+        assert root.evaluate(UNANSWERED_JS) == 4              # checkbox, radio group, select, combobox
+        page.check("input[type=checkbox]")
+        page.check("input[name=auth] >> nth=1")
+        page.select_option("select", "Yes")
+        page.evaluate("document.querySelector('[role=combobox]').textContent = 'Yes'")
+        assert root.evaluate(UNANSWERED_JS) == 0
+        browser.close()
+
+
 def test_dashboard_only_answers_local_requests():
     from fastapi.testclient import TestClient
 
