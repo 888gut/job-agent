@@ -358,7 +358,9 @@ function jobCard(j) {
       <div class="score">${meter(j.score)}</div>
       <div class="actions btn-row">
         ${j.status === "needs_manual"
-          ? `<button class="btn small" data-act="open">Open in browser</button><button class="btn small green" data-act="mark">I applied</button>`
+          ? (j.apply_type === "external"
+            ? `<button class="btn small primary" data-act="employer">Apply on employer site</button>`
+            : `<button class="btn small" data-act="open">Open in browser</button>`)
           : `<button class="btn small green" data-act="approve">Approve &amp; Submit</button>`}
         <button class="btn small" data-act="skip">Skip</button>
       </div>
@@ -404,6 +406,13 @@ async function jobAction(b) {
     else if (act === "original") { busy(b, true, "Switching…"); await post(`/api/jobs/${id}/use-original`); toast("Will send the original resume. The tailored Doc is kept for its branch."); }
     else if (act === "open") { await withBusy(b, "Opening…", async () => { const r = await post(`/api/jobs/${id}/open`); toast(r.message); }); return; }
     else if (act === "mark") { busy(b, true, "Saving…"); await post(`/api/jobs/${id}/mark-applied`); toast("Recorded as applied."); }
+    else if (act === "employer") {
+      busy(b, true, "Opening…");
+      const r = await post(`/api/jobs/${id}/employer-apply`);
+      if (r.kind === "email" && r.draft_url) { notice("Gmail draft ready", r.message); window.open(r.draft_url, "_blank", "noopener"); }
+      else if (r.job) { live.task = { ...r.job, kind: r.kind, filled: r.filled, resume: r.resume, target: r.target }; location.hash = "#/handshake"; return; }
+      else toast(r.message, r.ok);
+    }
     else if (act === "copy") { await navigator.clipboard.writeText(card.querySelector(".pitch").textContent); toast("Copied."); return; }
   } catch (e) { toast(e.message, false); }
   try { await render.queue(); } catch (e) { toast(e.message, false); }
@@ -677,6 +686,11 @@ render.settings = async () => {
       <span class="label">Remote</span><label class="check"><input type="checkbox" id="remote_ok" ${s.remote_ok ? "checked" : ""}> Include remote jobs</label>
       <label for="min_score">Minimum match</label><input type="number" id="min_score" min="0" max="100" value="${s.min_score}" style="width:90px" aria-describedby="minHelp">
       <div class="help" id="minHelp">Jobs below this score are skipped.</div>
+      <label for="exclude_titles">Skip titles with</label><textarea id="exclude_titles" aria-describedby="exclHelp">${esc((s.exclude_titles || []).join("\n"))}</textarea>
+      <div class="help" id="exclHelp">One word or phrase per line. Matching jobs are skipped without scoring.</div>
+      <span class="label">Part-time</span><label class="check"><input type="checkbox" id="skip_part_time" ${s.skip_part_time ? "checked" : ""}> Skip part-time and consulting roles</label>
+      <label for="max_commute_minutes">Longest commute (min)</label><input type="number" id="max_commute_minutes" min="0" max="300" value="${s.max_commute_minutes}" style="width:90px" aria-describedby="commuteHelp">
+      <div class="help" id="commuteHelp">On-site or hybrid jobs farther than this from Location score at most 45.</div>
       <label for="tailor_below">Tailor when below</label><input type="number" id="tailor_below" min="0" max="101" value="${s.tailor_below}" style="width:90px" aria-describedby="tailorHelp">
       <div class="help" id="tailorHelp">Jobs between the minimum and this score get a tailored resume.</div>
       <label for="max_new_per_run">New jobs per search</label><input type="number" id="max_new_per_run" min="1" max="100" value="${s.max_new_per_run}" style="width:90px">
@@ -699,6 +713,8 @@ render.settings = async () => {
     const body = {
       queries: v("queries").value.split("\n").map((x) => x.trim()).filter(Boolean), location: v("location").value.trim(),
       remote_ok: v("remote_ok").checked, min_score: +v("min_score").value, tailor_below: +v("tailor_below").value,
+      exclude_titles: v("exclude_titles").value.split("\n").map((x) => x.trim()).filter(Boolean),
+      skip_part_time: v("skip_part_time").checked, max_commute_minutes: +v("max_commute_minutes").value,
       max_new_per_run: +v("max_new_per_run").value, model: v("model").value.trim(), dry_run: v("dry_run").checked,
       daily_cap: +v("daily_cap").value, schedule_enabled: v("schedule_enabled").checked, schedule_hours: +v("schedule_hours").value,
     };
@@ -788,10 +804,40 @@ async function liveRun(id) {
   }
 }
 
+// Banner for an employer-site application open in this tab.
+function employerBanner() {
+  const t = live.task, box = $("#hsNext");
+  if (!t || !box) return;
+  const parts = [...(t.filled || []), ...(t.resume ? ["resume attached"] : [])];
+  const did = t.kind === "two-step" ? "" : parts.length ? `Filled in: <b>${esc(parts.join(", "))}</b>.` : "Nothing could be filled in automatically on this page.";
+  const step = t.kind === "two-step"
+    ? `Handshake asks for this in two steps. ${t.resume ? "Step 1 has your resume for this job attached. " : ""}Check it in the view below, then click <b>Step 2: External Application</b> yourself (that sends Step 1 to the employer and opens their page). Then click <b>Fill in</b> here.`
+    : t.kind === "account"
+    ? "This site wants you to sign in or create an account first. Do that on the page (the agent never types passwords), then click <b>Fill in again</b>."
+    : "Answer anything else on the page and click its <b>Submit</b> button yourself. If the form has more pages, click <b>Fill in again</b> on each.";
+  box.hidden = false;
+  box.className = "hs-next emp";
+  box.innerHTML = `<div class="emp-text"><b>${esc(t.title)}</b> at ${esc(t.company)}, on the employer's site. ${did} ${step}</div>
+    <div class="btn-row"><button class="btn small" id="empFill">${t.kind === "two-step" ? "Fill in" : "Fill in again"}</button><button class="btn small green" id="empDone">I applied</button><button class="btn small" id="empClose">Not now</button></div>`;
+  $("#empFill").onclick = (e) => withBusy(e.currentTarget, "Filling…", async () => {
+    const r = await post(`/api/jobs/${t.id}/employer-fill`, JSON.stringify({ target: t.target }));
+    t.filled = [...new Set([...(t.filled || []), ...(r.filled || [])])]; t.resume = t.resume || r.resume; t.target = r.target || t.target;
+    t.kind = r.account ? "account" : "form";
+    toast(r.filled?.length || r.resume ? "Filled in what it could." : "Nothing new to fill on this page.", true); employerBanner();
+  });
+  $("#empDone").onclick = (e) => withBusy(e.currentTarget, "Saving…", async () => {
+    await post(`/api/jobs/${t.id}/mark-applied`);
+    notice("Application recorded", `${t.title} at ${t.company} is logged in your Applications and Sheet.`);
+    live.task = null; box.hidden = true; refreshChrome();
+  });
+  $("#empClose").onclick = () => { live.task = null; box.hidden = true; };
+}
+
 render.handshake = async () => {
   const s = await api("/api/live/status");
   view.innerHTML = `<h1>Handshake</h1>
     <p class="subtitle">A live view of the agent's own Chrome, which runs out of sight. Sign in here, or watch what it's doing.</p>
+    <div class="hs-next" id="hsNext" hidden></div>
     <div class="panel hs-live">
       <div class="hs-bar">
         <button class="btn small" id="hsBack" title="Back">&#8592; Back</button>
@@ -809,7 +855,6 @@ render.handshake = async () => {
       </div>
       <div class="hs-foot" id="hsLine"></div>
     </div>
-    <div class="hs-next" id="hsNext" hidden></div>
     <p class="hint">What you type goes straight to the Handshake page. The dashboard doesn't save or log it.</p>`;
   liveChrome(s);
   const showNext = (r) => {
@@ -822,6 +867,7 @@ render.handshake = async () => {
     $("#hsGoQueue")?.addEventListener("click", () => { location.hash = "#/queue"; });
   };
   if (live.done) showNext(live.done);
+  employerBanner();
 
   const signIn = (btn) => withBusy(btn, "Opening…", async () => {
     live.done = null; $("#hsNext").hidden = true;

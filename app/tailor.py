@@ -51,6 +51,11 @@ Make minor, targeted edits:
 - The coursework line may name relevant courses that appear on the transcript.
 - Keep the candidate's voice and keep each line the same length or shorter: it must still fit in
   the same number of lines. Do not change paragraphs that are already a good fit.
+- Keep qualifiers that describe what kind of experience it is ("independent", "personal",
+  "volunteer", "self-taught"): never make personal or side activity read like paid professional work.
+- The coursework line lists only the school's own courses. Self-study platforms and online
+  courses stay where they already are.
+- Each edited line must read naturally, as the candidate would write it. No stiff phrasing.
 - 2-6 edits is typical. Fewer is fine. If nothing should change, return no edits.
 
 Forbidden (the edit will be rejected):

@@ -29,6 +29,8 @@ class ResumeFit(BaseModel):
 class MatchResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     fits: list[ResumeFit]
+    hard_blocks: list[str]
+    red_flags: list[str]
     best_slot: str
     branch: str
     pitch: str
@@ -50,7 +52,18 @@ branch: the job family this posting belongs to, in 2-5 words (e.g. "Supply chain
  "E-commerce data analyst", "Retail store management"). Jobs that would want the same tailored
  resume belong to the same branch. If one of the EXISTING BRANCHES listed for the best slot
  fits, return that name exactly; only invent a new branch when none fits.
-pitch: 2-3 first-person sentences the candidate could paste into a "Why are you interested?" box, using only facts from the chosen resume. No invented experience."""
+pitch: 2-3 first-person sentences the candidate could paste into a "Why are you interested?" box, using only facts from the chosen resume. No invented experience.
+Branches are role families, not industries or catch-alls: never group front desk, office admin or
+ studio work with logistics or analyst roles. Don't create near-duplicates of an existing branch.
+hard_blocks: requirements the candidate clearly cannot meet, each a short phrase. Only these kinds:
+ a required class year, graduation year or "current student" status the resume doesn't match; a
+ required major, MBA or degree the resume lacks; a required language the resume doesn't show;
+ in-person or hybrid work more than {commute} minutes by transit from {home}. [] when none.
+ "Preferred" or "nice to have" items are gaps, not hard blocks.
+red_flags: signs the posting may not be a real entry-level job, each a short phrase: commission-only
+ or commission-heavy pay, full-time pay far below minimum wage, vague duties with recruiting or
+ "training program" fees, a staffing middleman hiding the real employer, requests for money or
+ personal financial details. [] when none."""
 
 
 _SPACES = re.compile(r"[ \t ]+")
@@ -79,8 +92,26 @@ def resumes_block(resumes: dict[str, str]) -> str:
     return "\n\n".join(f"<resume slot=\"{slot}\">\n{text}\n</resume>" for slot, text in resumes.items())
 
 
+CAP = 45  # the most a job with a hard block or red flag can score
+
+
+def screen(job: dict, settings: dict) -> str | None:
+    """Cheap check before asking Claude: a reason to skip this job outright, or None."""
+    title = job.get("title", "")
+    for word in settings.get("exclude_titles", []):
+        if word.strip() and re.search(rf"(?<![A-Za-z]){re.escape(word.strip())}(?![A-Za-z])", title, re.I):
+            return f"Title is excluded ({word.strip()})"
+    if settings.get("skip_part_time", True):
+        kind = f"{job.get('job_type', '')} {title}"
+        if re.search(r"part[- ]?time", kind, re.I) and not re.search(r"full[- ]?time", job.get("job_type", ""), re.I):
+            return "Part-time role"
+        if re.search(r"\bconsult(ant|ing)\b", title, re.I):
+            return "Consulting role"
+    return None
+
+
 def score_job(job: dict, resumes: dict[str, str], model: str,
-              branches: dict[str, list[str]] | None = None) -> MatchResult:
+              branches: dict[str, list[str]] | None = None, home: str = "", commute: int = 75) -> MatchResult:
     """resumes: {"A": text, "B": text}; branches: existing tailored branches per slot."""
     branches = branches or {}
     listing = "\n".join(f"Slot {s}: {', '.join(b) if b else '(none yet)'}" for s, b in
@@ -89,12 +120,17 @@ def score_job(job: dict, resumes: dict[str, str], model: str,
         f"JOB\nTitle: {job['title']}\nCompany: {job['company']}\nLocation: {job['location']}\n"
         f"Type: {job['job_type']}\n\n{job['description']}\n\nEXISTING BRANCHES\n{listing}"
     )
-    result = ask_json(MatchResult, SCORE_SYSTEM, user, model=model, effort="medium",
+    system = SCORE_SYSTEM.replace("{home}", home or "the candidate's city").replace("{commute}", str(commute))
+    result = ask_json(MatchResult, system, user, model=model, effort="medium",
                       cached_prefix=resumes_block(resumes))
     known = {b.lower(): b for b in branches.get(result.best_slot, [])}
     result.branch = known.get(result.branch.strip().lower(), result.branch.strip())
     for f in result.fits:
         f.score = max(0, min(100, int(f.score)))
+        if result.hard_blocks or result.red_flags:
+            f.score = min(f.score, CAP)
+            f.gaps = [f"Hard requirement: {b}" for b in result.hard_blocks] + \
+                     [f"Red flag: {b}" for b in result.red_flags] + f.gaps
     if result.best_slot not in resumes:
         result.best_slot = max(result.fits, key=lambda f: f.score).slot if result.fits else next(iter(resumes))
     return result

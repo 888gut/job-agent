@@ -4,7 +4,7 @@ import json
 import re
 import shutil
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -58,6 +58,8 @@ async def lifespan(_app: FastAPI):
     scheduler.start()
     _reschedule()
     scheduler.add_job(_gmail_tick, "interval", minutes=30, id="gmail", coalesce=True)
+    scheduler.add_job(pipeline.cleanup_handshake_docs, "interval", hours=24, id="hs_docs", coalesce=True,
+                      next_run_time=datetime.now() + timedelta(minutes=10))
     yield
     scheduler.shutdown(wait=False)
     handshake.run(handshake.close)
@@ -283,6 +285,72 @@ async def open_job(job_id: int):
         return {"ok": True, "message": "Opened the posting in your browser."}
     except Exception as e:
         return {"ok": False, "message": str(e)}
+
+
+async def _employer_inputs(job_id: int):
+    with session() as s:
+        job = s.get(Job, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found.")
+    pdf = await asyncio.to_thread(pipeline.resume_pdf_for, job)
+    if not pdf:
+        raise HTTPException(400, "No resume uploaded for this job's slot.")
+    return job, pdf, pipeline.upload_name_for(job), pipeline.contact_for(job)
+
+
+@app.post("/api/jobs/{job_id}/employer-apply")
+async def employer_apply(job_id: int):
+    """Open the employer's own application in the dashboard's browser tab, filled in as far as is
+    safe. You answer anything else and click Submit there yourself."""
+    if (busy := _agent_busy()):
+        raise HTTPException(409, f"The agent is busy ({busy}). Try again when it's done.")
+    if handshake.login_open():
+        raise HTTPException(409, "Finish signing in to Handshake first.")
+    try:
+        job, pdf, name, contact = await _employer_inputs(job_id)
+    except google_store.NotConnected:
+        raise HTTPException(400, "Connect the storage Google account (Settings) so the tailored resume can be made.")
+    reuse = await asyncio.to_thread(pipeline.known_doc, pdf)
+    r = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.employer_apply, job.url, pdf, name, contact, reuse)), timeout=150)
+    if r.get("doc_id"):
+        await asyncio.to_thread(pipeline.note_doc_use, r["doc_id"], pdf, name, False)
+    kind = r.get("kind")
+    if kind == "handshake":
+        pipeline._set_status(job_id, "queued", "Handshake now offers its own Quick apply for this job, so it's back in the queue.")
+        return {"ok": True, "kind": kind, "message": f"{job.company} now takes applications on Handshake. It's back in the Approval Queue."}
+    if kind == "two-step":
+        live.select(r["target"])
+        return {"ok": True, "kind": kind, "target": "", "filled": [], "resume": r.get("resume", False),
+                "message": r.get("message", ""), "job": {"id": job.id, "title": job.title, "company": job.company}}
+    if kind in ("blocked", "none"):
+        return {"ok": False, "kind": kind, "message": r.get("message", "Couldn't open the employer's page.")}
+    if kind == "email":
+        try:
+            link = await asyncio.to_thread(
+                gmail_watch.create_draft, r["email"], f"Application: {job.title}",
+                f"Hello,\n\nI'd like to apply for the {job.title} position at {job.company}. My resume is attached.\n\n"
+                f"Thank you for your consideration,\n{contact['name']}\n{contact['phone']}\n{contact['email']}\n",
+                pdf, name)
+            return {"ok": True, "kind": kind, "draft_url": link, "to": r["email"],
+                    "message": f"This employer takes applications by email. A draft to {r['email']} with your resume attached is in your Gmail Drafts. Review it and click Send."}
+        except google_store.NotConnected:
+            kind = "form"  # no Gmail connected: just show the page
+    live.select(r["target"])
+    return {"ok": True, "kind": kind, "url": r.get("url"), "target": r["target"], "filled": r.get("filled", []),
+            "resume": r.get("resume", False), "job": {"id": job.id, "title": job.title, "company": job.company}}
+
+
+@app.post("/api/jobs/{job_id}/employer-fill")
+async def employer_fill(job_id: int, request: Request):
+    if (busy := _agent_busy()):
+        raise HTTPException(409, f"The agent is busy ({busy}).")
+    target = (await request.json()).get("target", "")
+    job, pdf, name, contact = await _employer_inputs(job_id)
+    try:
+        r = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.employer_fill, target, pdf, name, contact)), timeout=90)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True, **r}
 
 
 @app.post("/api/jobs/{job_id}/mark-applied")
@@ -516,6 +584,7 @@ async def upload_resume(slot: str, file: UploadFile = File(...), label: str = Fo
 
 # ---------------- settings & connections ----------------
 EDITABLE = {"queries", "location", "remote_ok", "max_new_per_run", "min_score", "tailor_below", "model",
+            "exclude_titles", "skip_part_time", "max_commute_minutes",
             "daily_cap", "dry_run", "schedule_enabled", "schedule_hours"}
 
 

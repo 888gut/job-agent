@@ -72,6 +72,18 @@ class TailoredResume(SQLModel, table=True):
     created_at: datetime = Field(default_factory=now)
 
 
+class HandshakeDoc(SQLModel, table=True):
+    """A resume the agent uploaded to your Handshake Documents, so the same PDF is reused
+    instead of uploaded again, and copies unused for a week can be deleted."""
+    doc_id: str = Field(primary_key=True)    # Handshake's document id (/docs/<id>)
+    name: str = ""
+    pdf_hash: str = Field(default="", index=True)
+    uploaded_at: datetime = Field(default_factory=now)
+    last_used_at: datetime = Field(default_factory=now)
+    sent: bool = False                       # attached to a submitted application: never deleted
+    deleted: bool = False
+
+
 class Job(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     handshake_id: str = Field(index=True, unique=True)

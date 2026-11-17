@@ -21,7 +21,7 @@ from .handshake import DEBUG_PORT
 
 _BASE = f"http://127.0.0.1:{DEBUG_PORT}"
 _lock = threading.Lock()
-_conn: dict = {"ws": None, "target": None, "id": 0, "want": None, "size": (1280, 900)}
+_conn: dict = {"ws": None, "target": None, "id": 0, "want": None, "size": (1280, 900), "seen": set()}
 
 _HIDDEN = ("devtools://", "chrome://", "chrome-extension://", "chrome-untrusted://", "edge://")
 
@@ -62,7 +62,13 @@ def _drop() -> None:
 
 def _pick(open_tabs: list[dict]) -> dict:
     if not open_tabs:
+        _conn["seen"] = set()
         raise NoBrowser()
+    ids = {t["id"] for t in open_tabs}
+    fresh = [t for t in open_tabs if t["id"] not in _conn["seen"]]
+    if _conn["seen"] and fresh:  # a tab just opened (e.g. the employer's page): show it
+        _conn["want"] = fresh[0]["id"]
+    _conn["seen"] = ids
     for t in open_tabs:
         if t["id"] == _conn["want"]:
             return t

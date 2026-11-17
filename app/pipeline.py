@@ -15,8 +15,8 @@ from sqlmodel import func, select
 
 from . import facts, google_store, handshake, layout
 from .config import MASTERS, TAILORED
-from .db import Application, Job, Resume, TailoredResume, get_settings, log, now, save_settings, session
-from .matcher import best_fit, extract_job, score_job
+from .db import Application, HandshakeDoc, Job, Resume, TailoredResume, get_settings, log, now, save_settings, session
+from .matcher import best_fit, extract_job, score_job, screen
 from .tailor import parse_layout, plan_tailoring
 
 _run_lock = threading.Lock()
@@ -30,6 +30,112 @@ def current_resumes() -> dict[str, Resume]:
         for r in s.exec(select(Resume).order_by(Resume.uploaded_at)):
             out[r.slot] = r  # newest per slot wins
         return out
+
+
+# ---------------- your Handshake documents ----------------
+def pdf_hash(pdf: Path) -> str:
+    """Fingerprint of what the resume says (its text and layout), not the file bytes: every export
+    from Google Docs stamps a new date into the PDF, so identical resumes have different bytes."""
+    import hashlib
+
+    try:
+        with pymupdf.open(str(pdf)) as doc:
+            parts = [f"{len(doc)}"] + [pg.get_text("text") for pg in doc]
+        return hashlib.sha256("|page|".join(parts).encode("utf-8")).hexdigest()
+    except Exception:
+        return hashlib.sha256(Path(pdf).read_bytes()).hexdigest()
+
+
+def known_doc(pdf: Path) -> str:
+    """Handshake document id of an identical PDF the agent uploaded before (reused, not re-uploaded)."""
+    h = pdf_hash(pdf)
+    with session() as s:
+        row = s.exec(select(HandshakeDoc).where(HandshakeDoc.pdf_hash == h, HandshakeDoc.deleted == False)  # noqa: E712
+                     .order_by(HandshakeDoc.last_used_at.desc())).first()
+        return row.doc_id if row else ""
+
+
+def note_doc_use(doc_id: str, pdf: Path, name: str, sent: bool) -> None:
+    if not doc_id:
+        return
+    with session() as s:
+        row = s.get(HandshakeDoc, doc_id) or HandshakeDoc(doc_id=doc_id, name=name, pdf_hash=pdf_hash(pdf))
+        row.last_used_at, row.sent, row.deleted = now(), row.sent or sent, False
+        s.add(row)
+        s.commit()
+
+
+def adopt_old_uploads() -> int:
+    """One time: find resumes the agent uploaded before it kept track (named like
+    'First_Last_Resume.pdf (3)') so the weekly cleanup covers them too. Any uploaded on a day
+    something was really submitted is marked as sent, so it's never deleted."""
+    from datetime import datetime as _dt
+
+    base = None
+    for r in current_resumes().values():
+        base = upload_name_for(Job(handshake_id="-", url="", title="", company="", resume_slot=r.slot))
+        break
+    if not base:
+        return 0
+    rx = re.compile(re.escape(base) + r"(?: \(\d+\))?$")
+    with session() as s:
+        sent_days = {a.applied_at.date() for a in s.exec(select(Application).where(Application.is_demo == False))}  # noqa: E712
+    added = 0
+    for d in _hs(handshake.list_docs, timeout=180):
+        if not rx.match(d["name"]):
+            continue
+        m = re.search(r"([A-Z][a-z]+ \d{1,2}, \d{4})", d["row"])
+        try:
+            day = _dt.strptime(m.group(1), "%B %d, %Y") if m else None
+        except ValueError:
+            day = None
+        with session() as s:
+            if s.get(HandshakeDoc, d["id"]):
+                continue
+            s.add(HandshakeDoc(doc_id=d["id"], name=d["name"], pdf_hash="",
+                               uploaded_at=day or now(), last_used_at=day or now(),
+                               sent=(day is None) or (day.date() in sent_days)))
+            s.commit()
+            added += 1
+    return added
+
+
+def cleanup_handshake_docs() -> dict:
+    """Delete resumes the agent uploaded to Handshake that haven't been used for 7 days and were
+    never sent with an application. Your own documents are never touched."""
+    from datetime import timedelta
+
+    if batch["running"] or state["running"]:
+        return {"deleted": 0, "skipped": "busy"}
+    settings = get_settings()
+    if not settings.get("hs_docs_adopted"):
+        n = adopt_old_uploads()
+        save_settings({"hs_docs_adopted": True})
+        if n:
+            log(f"Found {n} resume copies the agent uploaded to Handshake earlier; they're now covered by the weekly cleanup.", "info")
+    cutoff = now() - timedelta(days=7)
+    with session() as s:
+        old = [d for d in s.exec(select(HandshakeDoc).where(HandshakeDoc.deleted == False, HandshakeDoc.sent == False))  # noqa: E712
+               if (d.last_used_at.replace(tzinfo=None) if d.last_used_at.tzinfo else d.last_used_at) < cutoff.replace(tzinfo=None)]
+    deleted = 0
+    for d in old:
+        if batch["running"] or state["running"]:
+            break
+        try:
+            ok = _hs(handshake.delete_doc, d.doc_id, timeout=120)
+        except Exception as e:
+            log(f"Couldn't delete an old resume copy on Handshake: {e}", "warn")
+            break
+        if ok:
+            with session() as s:
+                row = s.get(HandshakeDoc, d.doc_id)
+                row.deleted = True
+                s.add(row)
+                s.commit()
+            deleted += 1
+    if deleted:
+        log(f"Deleted {deleted} unused resume copies from your Handshake documents (unused for over a week).", "info")
+    return {"deleted": deleted, "candidates": len(old)}
 
 
 def record_handshake_login(ok: bool) -> None:
@@ -457,19 +563,7 @@ def _analyze_posting(hid: str, url: str, page_text: str, resume_texts: dict, set
               job_type=ex.job_type, deadline=ex.deadline, description=ex.description, apply_type=ex.apply_type)
 
     with (run.turn(ticket) if run else contextlib.nullcontext()):
-        match = score_job(_job_dict(job), resume_texts, settings["model"],
-                          run.branches() if run else branches_by_slot())
-        fit = best_fit(match)
-        job.score = fit.score if fit else 0
-        job.resume_slot = fit.slot if fit else None
-        job.reasons_json = json.dumps(fit.reasons if fit else [])
-        job.gaps_json = json.dumps(fit.gaps if fit else [])
-        job.pitch = match.pitch
-        job.branch = match.branch
-        if job.score < int(settings["min_score"]):
-            job.status = "skipped"
-        else:
-            job.status = "queued"
+        _score_into(job, resume_texts, settings, run.branches() if run else branches_by_slot())
         if run and job.status == "queued" and job.score < int(settings["tailor_below"]):
             run.pending.setdefault(job.resume_slot or "A", set()).add(job.branch)
     job.updated_at = now()
@@ -484,6 +578,52 @@ def _analyze_posting(hid: str, url: str, page_text: str, resume_texts: dict, set
     if job.score < int(settings["tailor_below"]):
         tailor_job(job.id)
     log(f"Queued {job.title} at {job.company} (match {job.score}, Resume {job.resume_slot})", "success", job.id)
+
+
+def _score_into(job: Job, resume_texts: dict, settings: dict, branches: dict) -> None:
+    """Screen and score a job, writing score, slot, reasons, gaps, pitch, branch and status."""
+    reason = screen(_job_dict(job), settings)
+    if reason:
+        job.score, job.reasons_json, job.gaps_json, job.status = 0, "[]", json.dumps([reason]), "skipped"
+        job.resume_slot = job.resume_slot or next(iter(resume_texts), None)
+        return
+    match = score_job(_job_dict(job), resume_texts, settings["model"], branches,
+                      home=settings.get("location", ""), commute=int(settings.get("max_commute_minutes", 75)))
+    fit = best_fit(match)
+    job.score = fit.score if fit else 0
+    job.resume_slot = fit.slot if fit else None
+    job.reasons_json = json.dumps(fit.reasons if fit else [])
+    job.gaps_json = json.dumps(fit.gaps if fit else [])
+    job.pitch = match.pitch
+    job.branch = match.branch
+    job.status = "skipped" if job.score < int(settings["min_score"]) else "queued"
+
+
+def rescore_open_jobs(include_skipped: bool = True) -> list[dict]:
+    """Score again every job not yet applied to, with the current rules. A job that newly passes
+    gets a tailored resume like any other; one that no longer passes is skipped (its tailored Doc
+    stays in Drive). Jobs that need you keep that status if they still pass."""
+    settings = get_settings()
+    resume_texts = {slot: r.text for slot, r in current_resumes().items()}
+    states = ["queued", "needs_manual"] + (["skipped"] if include_skipped else [])
+    with session() as s:
+        jobs = s.exec(select(Job).where(Job.status.in_(states), Job.is_demo == False)).all()  # noqa: E712
+    changes = []
+    for job in jobs:
+        before = (job.status, job.score)
+        _score_into(job, resume_texts, settings, branches_by_slot())
+        if job.status == "queued" and before[0] == "needs_manual":
+            job.status = "needs_manual"
+        job.updated_at = now()
+        with session() as s:
+            s.add(job)
+            s.commit()
+        if job.status != "skipped" and not job.tailored_id and job.score < int(settings["tailor_below"]):
+            tailor_job(job.id)
+        changes.append({"id": job.id, "title": job.title, "company": job.company,
+                        "before": before, "after": (job.status, job.score), "gaps": json.loads(job.gaps_json)[:3]})
+        log(f"Rescored {job.title} at {job.company}: {before[1]} -> {job.score} ({job.status})", "info", job.id)
+    return changes
 
 
 # ---------------- approval ----------------
@@ -548,8 +688,9 @@ def approve(job_id: int) -> dict:
         return {"ok": False, "message": "No resume uploaded for this slot."}
 
     log(f"Applying to {job.title} at {job.company}{' (dry run)' if settings['dry_run'] else ''}", "info", job_id)
+    reuse = known_doc(pdf)  # the same PDF is already in your Handshake documents: pick it, don't re-upload
     try:
-        result = _hs(handshake.apply, job.url, pdf, bool(settings["dry_run"]), upload_name_for(job))
+        result = _hs(handshake.apply, job.url, pdf, bool(settings["dry_run"]), upload_name_for(job), reuse)
     except FutureTimeout:
         # The browser may still be mid-application (it could even click Submit), so this is never a
         # plain failure: hand it to you to check, and stop any batch run.
@@ -562,6 +703,7 @@ def approve(job_id: int) -> dict:
         log(f"Apply failed for {job.company}: {e}", "error", job_id)
         return {"ok": False, "message": str(e)}
 
+    note_doc_use(result.doc_id, pdf, upload_name_for(job), sent=result.status == "applied")
     if result.status == "ready":  # dry run filled everything in: keep it in the queue so it can be submitted later
         _set_status(job_id, "queued", result.note)
         log(f"{job.company}: {result.note}", "info", job_id)
@@ -654,6 +796,22 @@ def record_application(job_id: int) -> None:
         log("Storage Google account isn't connected; application saved locally only.", "warn", job_id)
     except Exception as e:
         log(f"Couldn't write to the Google Sheet: {e}", "warn", job_id)
+
+
+def contact_for(job: Job) -> dict:
+    """Name, email and phone exactly as they appear at the top of the resume for this job."""
+    res = current_resumes()
+    r = res.get(job.resume_slot or "A") or next(iter(res.values()), None)
+    lines = [ln.strip() for ln in (r.text if r else "").splitlines() if ln.strip()]
+    name = lines[0] if lines else ""
+    if name.isupper():
+        name = name.title()
+    head = "\n".join(lines[:8])
+    email = re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", head)
+    phone = re.search(r"\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}", head)
+    parts = name.split()
+    return {"name": name, "first": parts[0] if parts else "", "last": parts[-1] if len(parts) > 1 else "",
+            "email": email.group(0) if email else "", "phone": phone.group(0) if phone else ""}
 
 
 def mark_applied_manually(job_id: int) -> None:

@@ -434,7 +434,7 @@ def test_score_job_clamps_fixes_slot_and_reuses_branch_name(monkeypatch):
     fake = matcher.MatchResult(
         fits=[matcher.ResumeFit(slot="A", score=130, reasons=["r"], gaps=[]),
               matcher.ResumeFit(slot="B", score=-5, reasons=[], gaps=["g"])],
-        best_slot="Z", branch="supply chain OPERATIONS ", pitch="p")
+        best_slot="Z", branch="supply chain OPERATIONS ", pitch="p", hard_blocks=[], red_flags=[])
     monkeypatch.setattr(matcher, "ask_json", lambda *a, **k: fake)
     res = matcher.score_job({"title": "t", "company": "c", "location": "", "job_type": "", "description": "d"},
                             {"A": "resume a", "B": "resume b"}, "claude-opus-5-5",
@@ -649,6 +649,83 @@ def test_required_question_check_catches_checkboxes_radios_and_dropdowns():
         browser.close()
 
 
+def test_employer_form_fill_only_contact_basics_and_resume(tmp_path):
+    from app import handshake
+    sync_api = pytest.importorskip("playwright.sync_api")
+    contact = {"name": "Pat Doe", "first": "Pat", "last": "Doe", "email": "pat@example.com", "phone": "(555) 010-0000"}
+    form = """<form>
+      <label>First Name <input name="first_name"></label>
+      <label for="ln">Last name</label><input id="ln">
+      <input type="email" placeholder="Email address">
+      <label>Mobile phone <input type="tel"></label>
+      <label>Company <input name="company"></label>
+      <label>Why do you want this job? <textarea name="why"></textarea></label>
+      <label>Resume/CV <input type="file" name="resume"></label>
+      <label>Cover letter <input type="file" name="cover"></label>
+    </form>"""
+    login = """<form><input type="email" placeholder="Email"><input type="password"></form>"""
+    pdf = tmp_path / "r.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    with sync_api.sync_playwright() as pw:
+        try:
+            browser = pw.chromium.launch(channel="chrome", headless=True)
+        except Exception:
+            pytest.skip("Chrome not available")
+        page = browser.new_page()
+        page.set_content(form)
+        out = handshake._fill_employer_page(page, pdf, "Pat_Doe_Resume.pdf", contact)
+        assert set(out["filled"]) == {"first name", "last name", "email", "phone"} and out["resume"]
+        assert page.input_value("[name=company]") == "" and page.input_value("[name=why]") == ""   # never guesses answers
+        assert page.eval_on_selector("[name=resume]", "e => e.files[0].name") == "Pat_Doe_Resume.pdf"
+        assert page.eval_on_selector("[name=cover]", "e => e.files.length") == 0
+        page.set_content(login)
+        out = handshake._fill_employer_page(page, pdf, None, contact)
+        assert out["account"] and out["filled"] == [] and not out["resume"]                       # sign-in pages are yours
+        browser.close()
+
+
+def test_contact_for_reads_the_resume_header():
+    from app import pipeline
+    from app.db import Job, Resume
+
+    r = Resume(slot="A", filename="a.pdf", path="a.pdf", text="PAT DOE\npat@example.com | (555) 010-0000 | City, ST\nEducation")
+    pipeline_resumes = pipeline.current_resumes
+    try:
+        pipeline.current_resumes = lambda: {"A": r}
+        c = pipeline.contact_for(Job(handshake_id="c1", url="u", title="t", company="c", resume_slot="A"))
+    finally:
+        pipeline.current_resumes = pipeline_resumes
+    assert c == {"name": "Pat Doe", "first": "Pat", "last": "Doe", "email": "pat@example.com", "phone": "(555) 010-0000"}
+
+
+def test_handshake_docs_are_reused_and_old_unsent_copies_cleaned(monkeypatch, tmp_path):
+    from datetime import timedelta
+
+    from app import pipeline
+    from app.db import HandshakeDoc, init_db, now, session
+
+    init_db()
+    pdf = tmp_path / "t.pdf"
+    pdf.write_bytes(b"%PDF tailored v1")
+    assert pipeline.known_doc(pdf) == ""
+    pipeline.note_doc_use("d-new", pdf, "R.pdf", sent=False)
+    assert pipeline.known_doc(pdf) == "d-new"                     # same PDF -> reuse, no new upload
+    pdf.write_bytes(b"%PDF tailored v2 (you edited the Doc)")
+    assert pipeline.known_doc(pdf) == ""                          # changed PDF -> upload a fresh copy
+    old = now() - timedelta(days=8)
+    with session() as s:
+        s.add(HandshakeDoc(doc_id="d-old", last_used_at=old))
+        s.add(HandshakeDoc(doc_id="d-old-sent", last_used_at=old, sent=True))
+        s.commit()
+    deleted = []
+    monkeypatch.setattr(pipeline, "_hs", lambda fn, *a, **k: deleted.append(a[0]) or True)
+    monkeypatch.setattr(pipeline, "get_settings", lambda: {"hs_docs_adopted": True})
+    r = pipeline.cleanup_handshake_docs()
+    assert deleted == ["d-old"] and r["deleted"] == 1           # recent and sent copies are kept
+    with session() as s:
+        assert s.get(HandshakeDoc, "d-old").deleted and not s.get(HandshakeDoc, "d-old-sent").deleted
+
+
 def test_dashboard_only_answers_local_requests():
     from fastapi.testclient import TestClient
 
@@ -739,10 +816,37 @@ def test_ask_json_waits_out_transient_errors_but_not_bad_requests(monkeypatch):
     assert len(msgs.calls) == 1 and waits == []
 
 
+def test_screen_skips_excluded_titles_part_time_and_consulting():
+    s = {"exclude_titles": ["intern", "front desk", "senior", "manager"], "skip_part_time": True}
+    job = lambda title, kind="Full-time": {"title": title, "job_type": kind}  # noqa: E731
+    assert matcher.screen(job("Supply Chain Analyst"), s) is None
+    assert matcher.screen(job("Internal Operations Analyst"), s) is None      # whole words only
+    assert "intern" in matcher.screen(job("Data Analyst Intern"), s)
+    assert "front desk" in matcher.screen(job("Front Desk & Operations Coordinator"), s)
+    assert matcher.screen(job("Senior Logistics Analyst"), s)
+    assert matcher.screen(job("Business Analyst", "Part-time"), s) == "Part-time role"
+    assert matcher.screen(job("Strategy Consultant"), s) == "Consulting role"
+    assert matcher.screen(job("Business Analyst", "Part-time"), {**s, "skip_part_time": False}) is None
+
+
+def test_hard_blocks_and_red_flags_cap_the_score(monkeypatch):
+    seen = {}
+    fake = matcher.MatchResult(fits=[matcher.ResumeFit(slot="A", score=80, reasons=[], gaps=["Excel"])],
+                               best_slot="A", branch="b", pitch="p",
+                               hard_blocks=["Requires a current senior"], red_flags=["Commission-only pay"])
+    monkeypatch.setattr(matcher, "ask_json", lambda *a, **k: seen.update(system=a[1]) or fake)
+    res = matcher.score_job({"title": "Analyst", "company": "c", "location": "", "job_type": "", "description": "d"},
+                            {"A": "resume a"}, "claude-opus-5-5", home="New York, NY", commute=75)
+    fit = matcher.best_fit(res)
+    assert fit.score == matcher.CAP
+    assert fit.gaps[:2] == ["Hard requirement: Requires a current senior", "Red flag: Commission-only pay"]
+    assert "75 minutes by transit from New York, NY" in seen["system"]
+
+
 def test_score_and_tailor_send_stable_text_as_cached_prefix(monkeypatch, full_pdf):
     seen = {}
     fake = matcher.MatchResult(fits=[matcher.ResumeFit(slot="A", score=70, reasons=[], gaps=[])],
-                               best_slot="A", branch="b", pitch="p")
+                               best_slot="A", branch="b", pitch="p", hard_blocks=[], red_flags=[])
     monkeypatch.setattr(matcher, "ask_json", lambda *a, **k: seen.update(score=(a, k)) or fake)
     matcher.score_job({"title": "Analyst", "company": "c", "location": "", "job_type": "", "description": "d"},
                       {"A": "resume a", "B": "resume b"}, "claude-opus-5-5", {"A": ["Ops"]})
@@ -809,13 +913,13 @@ def test_search_reads_in_browser_thread_and_reviews_in_parallel(monkeypatch):
         return matcher.JobExtract(title=url[-2:], company="Co", location="", job_type="", deadline="",
                                   description="d", apply_type="handshake")
 
-    def fake_score(job, resumes, model, branches):
+    def fake_score(job, resumes, model, branches, **_kw):
         scored_with[job["title"]] = {k: list(v) for k, v in branches.items()}
         if job["title"] == "p2":
             raise _api_error(anthropic.OverloadedError, 529)
         score = {"p0": 70, "p1": 72, "p3": 30}[job["title"]]
         return matcher.MatchResult(fits=[matcher.ResumeFit(slot="A", score=score, reasons=[], gaps=[])],
-                                   best_slot="A", branch="Brand new family", pitch="")
+                                   best_slot="A", branch="Brand new family", pitch="", hard_blocks=[], red_flags=[])
 
     monkeypatch.setattr(pipeline, "_hs", fake_hs)
     monkeypatch.setattr(handshake, "read_posting", fake_read)

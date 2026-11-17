@@ -38,6 +38,7 @@ SUCCESS_RX = re.compile(r"application (was )?(submitted|sent)|you applied|succes
 class ApplyResult:
     status: str          # applied | ready | needs_manual | blocked (CAPTCHA/sign-in: stop the whole run)
     note: str = ""
+    doc_id: str = ""     # the Handshake document that was attached
 
 
 def _with_retry(fn, *args):
@@ -445,6 +446,211 @@ def open_for_user(url: str) -> None:
     webbrowser.open(url)
 
 
+# Fills only your contact basics on an employer's form, by matching each empty field's label.
+# Never touches password fields, checkboxes, radio buttons, dropdowns or free-text questions.
+FILL_JS = r"""(c) => {
+  const set = (el, v) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, v);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const labelOf = (el) => {
+    let t = [el.name, el.id, el.placeholder, el.getAttribute('aria-label'), el.getAttribute('autocomplete')].join(' ');
+    if (el.id) { const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l) t += ' ' + l.innerText; }
+    const p = el.closest('label'); if (p) t += ' ' + p.innerText;
+    return t.toLowerCase();
+  };
+  const rules = [
+    ['first name', /first.?name|given.?name|fname/, c.first],
+    ['last name', /last.?name|family.?name|surname|lname/, c.last],
+    ['email', /e-?mail/, c.email],
+    ['phone', /phone|mobile|\btel\b/, c.phone],
+    ['name', /full.?name|your.?name|\bname\b/, c.name],
+  ];
+  const filled = [];
+  const sel = 'input:not([type]), input[type=text], input[type=email], input[type=tel]';
+  for (const el of document.querySelectorAll(sel)) {
+    if (!el.offsetParent || el.value || el.disabled || el.readOnly) continue;
+    const l = labelOf(el);
+    if (/user.?name|login|password|search|company|employer|school|reference|referr/.test(l)) continue;
+    for (const [key, rx, val] of rules) {
+      if (val && rx.test(l)) { set(el, val); filled.push(key); break; }
+    }
+  }
+  return [...new Set(filled)];
+}"""
+
+
+def _target_id(page) -> str:
+    return page.context.new_cdp_session(page).send("Target.getTargetInfo")["targetInfo"]["targetId"]
+
+
+def _fill_employer_page(emp, resume_pdf: Path, upload_name: str | None, contact: dict) -> dict:
+    """Fill contact basics and attach the resume on an employer page. Never clicks Submit."""
+    out = {"filled": [], "resume": False, "account": False, "email": ""}
+    mails = [m for m in emp.eval_on_selector_all("a[href^='mailto:']", "els => els.map(e => e.href)") if "@" in m]
+    if mails:
+        out["email"] = mails[0][7:].split("?")[0]
+    for frame in emp.frames:  # some job forms (e.g. Greenhouse) sit inside an iframe
+        try:
+            if frame.locator("input[type=password]").count() and any(
+                    frame.locator("input[type=password]").nth(i).is_visible()
+                    for i in range(frame.locator("input[type=password]").count())):
+                out["account"] = True  # a sign-in / create-account page: that part is yours
+                continue
+            out["filled"] += frame.evaluate(FILL_JS, contact)
+        except Exception:
+            continue
+    out["filled"] = list(dict.fromkeys(out["filled"]))
+    if not out["account"]:
+        for frame in emp.frames:
+            try:
+                files = frame.locator("input[type=file]")
+                n = files.count()
+                if not n:
+                    continue
+                pick = 0
+                for i in range(n):  # prefer the resume/CV field over cover letter or transcript
+                    hint = (files.nth(i).evaluate("e => [e.name, e.id, e.accept, e.getAttribute('aria-label'), "
+                                                  "(e.closest('label,div,fieldset')||{}).innerText||''].join(' ')") or "").lower()
+                    if re.search(r"resume|cv\b|curriculum", hint):
+                        pick = i
+                        break
+                else:
+                    if n > 1:
+                        continue  # several upload boxes and none says resume: leave it to you
+                files.nth(pick).set_input_files(str(_upload_copy(Path(resume_pdf), upload_name)))
+                out["resume"] = True
+                break
+            except Exception:
+                continue
+    return out
+
+
+def employer_apply(url: str, resume_pdf: Path, upload_name: str | None, contact: dict, doc_id: str = "") -> dict:
+    """Open a posting's 'Apply externally' page in a new tab of the agent's browser, fill your
+    contact basics and attach your resume where that's safe, and leave it for you to finish.
+    It never creates accounts, types passwords, answers questions or clicks Submit."""
+    page = _page()
+    page.goto(url, wait_until="domcontentloaded")
+    _pause(3, 5)
+    if (b := _blocker(page)):
+        return {"kind": "blocked", "message": b}
+    _wait_for_apply_buttons(page)
+    if page.get_by_role("button", name=APPLY_BTN_RX).count():
+        return {"kind": "handshake"}
+    ext = page.get_by_role("button", name=EXTERNAL_RX)
+    if not ext.count():
+        ext = page.get_by_role("link", name=EXTERNAL_RX)
+    if not ext.count():
+        return {"kind": "none", "message": "Couldn't find the Apply externally button on the posting."}
+    emp = None
+    try:
+        with page.context.expect_page(timeout=8000) as info:
+            ext.first.click()
+        emp = info.value
+        try:
+            emp.wait_for_url(lambda u: u not in ("", "about:blank"), timeout=20000)
+        except Exception:
+            pass
+        emp.wait_for_load_state("domcontentloaded")
+    except Exception:
+        if "joinhandshake.com" not in page.url:  # opened in the same tab instead
+            emp = page
+    if emp is None:
+        # Some postings open a two-step box instead: Step 1 sends documents through Handshake,
+        # Step 2 opens the employer's page. Clicking Step 2 submits Step 1, so that click is yours.
+        box = page.locator("[role=dialog]").filter(has_text=re.compile(r"External Application", re.I))
+        if box.count():
+            scope = box.first
+            wants_doc = scope.locator("input[type=file]").count() or scope.locator("button.rosetta-inline-alert__close-button").count()
+            problem = _attach_resume(scope, resume_pdf, upload_name, doc_id) if wants_doc else None
+            return {"kind": "two-step", "target": _target_id(page), "url": page.url, "filled": [],
+                    "resume": bool(wants_doc) and problem is None, "message": problem or "",
+                    "doc_id": _attached_doc_id(scope) if wants_doc and problem is None else ""}
+        return {"kind": "none", "message": "The employer's application page didn't open."}
+    _pause(3, 5)
+    result = {"kind": "form", "url": emp.url, "target": _target_id(emp)}
+    if (b := _blocker(emp)):
+        return {**result, "kind": "page", "message": b, "filled": [], "resume": False}
+    filled = _fill_employer_page(emp, resume_pdf, upload_name, contact)
+    result.update(filled)
+    if filled["email"]:
+        result["kind"] = "email"
+    elif filled["account"]:
+        result["kind"] = "account"
+    return result
+
+
+def employer_fill(target_id: str, resume_pdf: Path, upload_name: str | None, contact: dict) -> dict:
+    """Fill again on the employer tab you're looking at (after you signed in, or on the next page)."""
+    pages = _context().pages
+    for p in pages:
+        try:
+            if target_id and _target_id(p) == target_id and "joinhandshake.com" not in p.url:
+                return {**_fill_employer_page(p, resume_pdf, upload_name, contact), "target": target_id}
+        except Exception:
+            continue
+    for p in reversed(pages):  # newest tab that isn't Handshake
+        if "joinhandshake.com" not in p.url and p.url not in ("", "about:blank"):
+            return {**_fill_employer_page(p, resume_pdf, upload_name, contact), "target": _target_id(p)}
+    raise RuntimeError("The employer's page isn't open yet. Click Step 2 on Handshake (or Apply on employer site) first.")
+
+
+LIST_DOCS_JS = r"""() => [...document.querySelectorAll('tr')].map(tr => {
+  const a = tr.querySelector('a[href*="/docs/"]'); if (!a) return null;
+  const m = (a.getAttribute('href') || '').match(/\/docs\/(\d+)/); if (!m) return null;
+  return {id: m[1], name: a.innerText.trim(), row: tr.innerText.replace(/\s+/g, ' ').trim()};
+}).filter(Boolean)"""
+
+
+def list_docs() -> list[dict]:
+    """Your Handshake documents: [{id, name, row}] (row text includes the upload date)."""
+    page = _context().new_page()
+    out: dict[str, dict] = {}
+    try:
+        for n in range(1, 11):
+            page.goto(f"{HANDSHAKE_BASE}/docs?page={n}", wait_until="domcontentloaded")
+            _pause(3, 4)
+            if (b := _blocker(page)):
+                raise RuntimeError(b)
+            rows = page.evaluate(LIST_DOCS_JS)
+            fresh = [r for r in rows if r["id"] not in out]
+            if not fresh:
+                break
+            out.update({r["id"]: r for r in fresh})
+    finally:
+        page.close()
+    return list(out.values())
+
+
+def delete_doc(doc_id: str) -> bool:
+    """Delete one of your Handshake documents (Edit > Delete). Only called for resumes the agent
+    itself uploaded that haven't been used for a week and were never sent with an application."""
+    page = _context().new_page()
+    try:
+        page.goto(f"{HANDSHAKE_BASE}/docs/{doc_id}/edit", wait_until="domcontentloaded")
+        _pause(3, 4)
+        if _blocker(page):
+            return False
+        btn = page.get_by_role("button", name=re.compile(r"^\s*delete\s*$", re.I))
+        if not btn.count():
+            return False
+        page.once("dialog", lambda d: d.accept())  # a browser "Are you sure?" prompt, if Handshake uses one
+        btn.first.click()
+        _pause(1.5, 2.5)
+        confirm = page.get_by_role("dialog").get_by_role("button", name=re.compile(r"delete|confirm|yes", re.I))
+        if confirm.count():
+            confirm.first.click()
+            _pause(2, 3)
+        page.goto(f"{HANDSHAKE_BASE}/docs/{doc_id}", wait_until="domcontentloaded")
+        _pause(2, 3)
+        gone = "/docs/" + doc_id not in page.url or bool(re.search(r"not found|doesn.t exist|no longer", page.inner_text("body")[:3000], re.I))
+        return gone
+    finally:
+        page.close()
+
+
 APPLY_BTN_RX = re.compile(r"^\s*(quick\s+|easy\s+)?apply(\s+now)?\s*$", re.I)
 EXTERNAL_RX = re.compile(r"apply\s+(externally|on\s+(company|employer)|on\s+.*site)", re.I)
 
@@ -464,7 +670,82 @@ def _upload_copy(resume_pdf: Path, upload_name: str | None) -> Path:
     return dest
 
 
-def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | None = None) -> ApplyResult:
+# Handshake's resume picker keeps document ids in a hidden <select>; the visible option at the same
+# position (id ending "-select-<n>") is the one to click. Returns that option's element id.
+DOC_OPTION_JS = r"""(root, docId) => {
+  const sel = [...root.querySelectorAll('select')].find(s => [...s.options].some(o => o.value === docId));
+  if (!sel) return null;
+  const i = [...sel.options].findIndex(o => o.value === docId);
+  let box = sel.parentElement;
+  for (let k = 0; k < 8 && box && !box.querySelector('[role=option]'); k++) box = box.parentElement;
+  const opt = box && [...box.querySelectorAll('[role=option]')].find(o => o.id.endsWith('-select-' + i));
+  return opt ? opt.id : null;
+}"""
+
+
+def _attached_doc_id(scope) -> str:
+    link = scope.locator("a[href*='/docs/']")
+    for i in range(link.count()):
+        m = re.search(r"/docs/(\d+)", link.nth(i).get_attribute("href") or "")
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _attach_resume(scope, resume_pdf: Path, upload_name: str | None, doc_id: str = "") -> str | None:
+    """In a Handshake application box: remove the resume Handshake pre-attached from your profile,
+    then attach ours: pick it from your Handshake documents when it was uploaded before (doc_id),
+    otherwise upload it and wait until Handshake has processed it. Returns a problem, or None.
+    Read the attached document's id afterwards with _attached_doc_id(scope)."""
+    upload = _upload_copy(Path(resume_pdf), upload_name)
+    attached = scope.locator("button.rosetta-inline-alert__close-button")
+    if attached.count():
+        attached.first.click()
+        _pause(1.5, 2.5)
+    if doc_id:  # reuse the copy already in your Handshake documents
+        try:
+            opt_id = scope.evaluate(DOC_OPTION_JS, doc_id)
+            if opt_id:
+                scope.locator(f"[id='{opt_id}']").first.click()
+                deadline = time.time() + 20
+                while time.time() < deadline:
+                    if _attached_doc_id(scope) == doc_id:
+                        return None
+                    time.sleep(1)
+        except Exception:
+            pass  # fall back to uploading it
+        attached = scope.locator("button.rosetta-inline-alert__close-button")
+        if attached.count():
+            attached.first.click()
+            _pause(1, 2)
+    file_inputs = scope.locator("input[type=file]")
+    if file_inputs.count() == 0:
+        return "No resume upload option found in the application form."
+    file_inputs.first.set_input_files(str(upload))
+    # wait until Handshake shows our file as attached AND has finished processing it
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        text = scope.inner_text()
+        busy = re.search(r"converting|uploading|processing", text, re.I)
+        if upload.name in text and not busy and scope.locator("button.rosetta-inline-alert__close-button").count():
+            return None
+        time.sleep(1.5)
+    return "Handshake didn't finish processing the resume upload. Check this job on Handshake."
+
+
+def _wait_for_apply_buttons(page, wait: float = 20.0) -> None:
+    """Postings render their Apply buttons a few seconds after the page loads (longer right after
+    the browser starts). Wait for one of them instead of deciding too early."""
+    end = time.time() + wait
+    applied_rx = re.compile(r"^\s*applied\b|withdraw", re.I)
+    while time.time() < end:
+        if (page.get_by_role("button", name=APPLY_BTN_RX).count() or page.get_by_role("button", name=EXTERNAL_RX).count()
+                or page.get_by_role("link", name=EXTERNAL_RX).count() or page.get_by_role("button", name=applied_rx).count()):
+            return
+        time.sleep(1)
+
+
+def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | None = None, doc_id: str = "") -> ApplyResult:
     """Open the posting, open its Handshake application form, swap in our resume and (unless
     dry_run) click Submit Application.
 
@@ -477,6 +758,7 @@ def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | N
         return ApplyResult("blocked", b)
 
     buttons = page.get_by_role("button", name=APPLY_BTN_RX)
+    _wait_for_apply_buttons(page)
     if buttons.count() == 0:
         if page.get_by_role("link", name=EXTERNAL_RX).count() or page.get_by_role("button", name=EXTERNAL_RX).count():
             return ApplyResult("needs_manual", "This job is applied for on the employer's own site.")
@@ -494,27 +776,9 @@ def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | N
     if dialog.count() == 0:
         return ApplyResult("needs_manual", "The application form didn't open.")
     scope = dialog.first
-    upload = _upload_copy(Path(resume_pdf), upload_name)
-
-    # Handshake pre-attaches a resume saved on your profile; remove it so ours is the one sent.
-    attached = scope.locator("button.rosetta-inline-alert__close-button")
-    if attached.count():
-        attached.first.click()
-        _pause(1.5, 2.5)
-    file_inputs = scope.locator("input[type=file]")
-    if file_inputs.count() == 0:
-        return ApplyResult("needs_manual", "No resume upload option found in the application form.")
-    file_inputs.first.set_input_files(str(upload))
-    # wait until Handshake shows our file as attached AND has finished processing it
-    deadline = time.time() + 90
-    while time.time() < deadline:
-        text = scope.inner_text()
-        busy = re.search(r"converting|uploading|processing", text, re.I)
-        if upload.name in text and not busy and scope.locator("button.rosetta-inline-alert__close-button").count():
-            break
-        time.sleep(1.5)
-    else:
-        return ApplyResult("needs_manual", "Handshake didn't finish processing the resume upload. Check this job on Handshake.")
+    if (problem := _attach_resume(scope, resume_pdf, upload_name, doc_id)):
+        return ApplyResult("needs_manual", problem)
+    doc_id = _attached_doc_id(scope)
     _pause(1.5, 2.5)
 
     # Extra required questions/documents we can't answer safely -> hand off to you.
@@ -531,22 +795,22 @@ def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | N
     if submit.count() == 0:
         return ApplyResult("needs_manual", "Couldn't find the Submit button.")
     if dry_run:
-        return ApplyResult("ready", "Dry run passed: everything was filled in and the agent stopped before Submit. To send it for real, turn off dry run in Settings, then click Approve & Submit.")
+        return ApplyResult("ready", "Dry run passed: everything was filled in and the agent stopped before Submit. To send it for real, turn off dry run in Settings, then click Approve & Submit.", doc_id)
 
     submit.first.click()
     _pause(4, 6)
     if (b := _blocker(page)):
         return ApplyResult("blocked", f"{b} It may or may not have been submitted. Check this job on Handshake.")
     if SUCCESS_RX.search(page.inner_text("body")[:10000]):
-        return ApplyResult("applied", "Submitted on Handshake.")
+        return ApplyResult("applied", "Submitted on Handshake.", doc_id)
     # Check the posting itself: once applied, Handshake swaps the Apply button for an Applied state.
     page.reload(wait_until="domcontentloaded")
     _pause(3, 5)
     body = page.inner_text("body")[:10000]
     if page.get_by_role("button", name=APPLY_BTN_RX).count() == 0 and (
             SUCCESS_RX.search(body) or re.search(r"\bapplied\b|withdraw", body, re.I)):
-        return ApplyResult("applied", "Submitted on Handshake.")
-    return ApplyResult("needs_manual", "Clicked Submit but couldn't confirm it went through. Check this job on Handshake.")
+        return ApplyResult("applied", "Submitted on Handshake.", doc_id)
+    return ApplyResult("needs_manual", "Clicked Submit but couldn't confirm it went through. Check this job on Handshake.", doc_id)
 
 
 def close() -> None:

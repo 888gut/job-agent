@@ -76,6 +76,23 @@ Job-alert digests from Handshake that merely mention a company are "other". Be c
 
 
 # ---------------- Gmail plumbing ----------------
+def create_draft(to: str, subject: str, body: str, attachment, filename: str) -> str:
+    """Save an email as a DRAFT in your Handshake Gmail with the resume attached. It is never
+    sent: you review it and click Send yourself. Returns a link to your Drafts folder."""
+    import base64
+    from email.message import EmailMessage
+    from pathlib import Path
+
+    msg = EmailMessage()
+    msg["To"], msg["Subject"] = to, subject
+    msg.set_content(body)
+    msg.add_attachment(Path(attachment).read_bytes(), maintype="application", subtype="pdf", filename=filename)
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    _service().users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
+    acct = get_settings().get("gmail_email") or ""
+    return f"https://mail.google.com/mail/?authuser={acct}#drafts" if acct else "https://mail.google.com/mail/#drafts"
+
+
 def _service():
     from googleapiclient.discovery import build
 

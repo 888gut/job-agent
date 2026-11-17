@@ -272,12 +272,16 @@ def lines_needed(text: str, width: float, size: float = 10.0, bold_prefix: str =
     return lines
 
 
+FIT_SLACK = 1.02
+
+
 def fits(layout: Layout, block: Block, new_text: str) -> tuple[bool, int, int]:
     """Does new_text fit in the same number of lines as the original block?"""
     width = layout.width_for(block.kind)
     prefix = block.left if block.kind == "labeled" else ""
     old_n = lines_needed(block.text, width, layout.body_size, prefix)
-    new_n = lines_needed(new_text, width, layout.body_size, prefix)
+    # 2% slack: the measured widths are a little conservative against the real PDF rendering
+    new_n = lines_needed(new_text, width * FIT_SLACK, layout.body_size, prefix)
     return new_n <= max(old_n, block.lines), old_n, new_n
 
 

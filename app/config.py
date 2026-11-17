@@ -33,7 +33,14 @@ DEFAULT_SETTINGS = {
     "max_new_per_run": 20,
     "top_n": 10,              # how many best matches the dashboard lists for Start
     # Scoring / tailoring
-    "min_score": 55,          # below this a job is skipped
+    "min_score": 60,          # below this a job is skipped
+    # Titles never worth applying to (whole words, case-insensitive); also part-time/consulting roles
+    "exclude_titles": ["intern", "internship", "co-op", "account executive", "sales representative",
+                       "sales rep", "content", "accounts payable", "front desk", "receptionist",
+                       "office coordinator", "studio coordinator", "senior", "sr", "manager",
+                       "technical business analyst"],
+    "skip_part_time": True,
+    "max_commute_minutes": 75,  # on-site/hybrid jobs farther than this from Location are capped
     "tailor_below": 80,       # scores in [min_score, tailor_below) get a tailored resume
     "model": "claude-opus-5-5",
     # Applying
