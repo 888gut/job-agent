@@ -545,6 +545,10 @@ def approve(job_id: int) -> dict:
         log(f"Apply failed for {job.company}: {e}", "error", job_id)
         return {"ok": False, "message": str(e)}
 
+    if result.status == "ready":  # dry run filled everything in: keep it in the queue so it can be submitted later
+        _set_status(job_id, "queued", result.note)
+        log(f"{job.company}: {result.note}", "info", job_id)
+        return {"ok": True, "message": result.note}
     if result.status != "applied":
         _set_status(job_id, "needs_manual", result.note)
         log(f"{job.company}: {result.note}", "warn", job_id)

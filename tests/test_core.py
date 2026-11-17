@@ -543,6 +543,30 @@ def test_apply_batch_runs_in_order_and_stops_at_daily_cap(monkeypatch):
     assert len(calls) == 1                                    # Stop takes effect after the current job
 
 
+def test_dry_run_keeps_job_in_queue_but_real_problems_need_you(monkeypatch, tmp_path):
+    from app import handshake, pipeline
+    from app.db import Job, init_db, session
+
+    init_db()
+    with session() as s:
+        jobs = [Job(handshake_id=f"dry{i}", url="u", title="Analyst", company=f"Dry{i}", status="queued") for i in range(2)]
+        s.add_all(jobs)
+        s.commit()
+        ids = [j.id for j in jobs]
+    pdf = tmp_path / "r.pdf"
+    pdf.write_bytes(b"%PDF")
+    monkeypatch.setattr(pipeline, "resume_pdf_for", lambda job: pdf)
+    monkeypatch.setattr(pipeline, "upload_name_for", lambda job: "Resume.pdf")
+    monkeypatch.setattr(pipeline, "applied_today", lambda: 0)
+    results = iter([handshake.ApplyResult("ready", "Dry run passed."), handshake.ApplyResult("needs_manual", "Extra questions.")])
+    monkeypatch.setattr(pipeline, "_hs", lambda *a, **k: next(results))
+    assert pipeline.approve(ids[0])["ok"] is True
+    pipeline.approve(ids[1])
+    with session() as s:
+        assert s.get(Job, ids[0]).status == "queued"            # still has Approve & Submit
+        assert s.get(Job, ids[1]).status == "needs_manual"
+
+
 def test_dashboard_only_answers_local_requests():
     from fastapi.testclient import TestClient
 

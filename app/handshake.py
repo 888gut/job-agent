@@ -429,7 +429,7 @@ def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | N
     if submit.count() == 0:
         return ApplyResult("needs_manual", "Couldn't find the Submit button.")
     if dry_run:
-        return ApplyResult("ready", "Dry run: everything was filled in and the agent stopped before Submit. Turn off dry run in Settings to submit for real.")
+        return ApplyResult("ready", "Dry run passed: everything was filled in and the agent stopped before Submit. To send it for real, turn off dry run in Settings, then click Approve & Submit.")
 
     submit.first.click()
     _pause(4, 6)
