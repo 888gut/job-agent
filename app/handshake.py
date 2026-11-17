@@ -293,8 +293,28 @@ def open_for_user(url: str) -> None:
     webbrowser.open(url)
 
 
-def apply(url: str, resume_pdf: Path, dry_run: bool = True) -> ApplyResult:
-    """Open the posting, attach the resume and (unless dry_run) click Submit.
+APPLY_BTN_RX = re.compile(r"^\s*(quick\s+|easy\s+)?apply(\s+now)?\s*$", re.I)
+EXTERNAL_RX = re.compile(r"apply\s+(externally|on\s+(company|employer)|on\s+.*site)", re.I)
+
+
+def _upload_copy(resume_pdf: Path, upload_name: str | None) -> Path:
+    """The employer sees the uploaded file's name, so upload a copy with a clean name
+    (e.g. First_Last_Resume.pdf) instead of an internal one like tailored_3.pdf."""
+    if not upload_name:
+        return resume_pdf
+    out_dir = BROWSER_PROFILE.parent / "uploads"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", upload_name).strip("_") or "Resume.pdf"
+    if not safe.lower().endswith(".pdf"):
+        safe += ".pdf"
+    dest = out_dir / safe
+    dest.write_bytes(Path(resume_pdf).read_bytes())
+    return dest
+
+
+def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | None = None) -> ApplyResult:
+    """Open the posting, open its Handshake application form, swap in our resume and (unless
+    dry_run) click Submit Application.
 
     Anything unexpected -> needs_manual, so you can finish that one yourself.
     """
@@ -304,31 +324,46 @@ def apply(url: str, resume_pdf: Path, dry_run: bool = True) -> ApplyResult:
     if (b := _blocker(page)):
         return ApplyResult("needs_manual", b)
 
-    apply_btn = page.get_by_role("button", name=re.compile(r"^\s*apply", re.I))
-    if apply_btn.count() == 0:
-        if page.get_by_role("link", name=re.compile(r"apply", re.I)).count():
+    buttons = page.get_by_role("button", name=APPLY_BTN_RX)
+    if buttons.count() == 0:
+        if page.get_by_role("link", name=EXTERNAL_RX).count() or page.get_by_role("button", name=EXTERNAL_RX).count():
             return ApplyResult("needs_manual", "This job is applied for on the employer's own site.")
-        if SUCCESS_RX.search(page.inner_text("body")[:8000]):
+        if page.get_by_role("button", name=re.compile(r"^\s*applied\b|withdraw", re.I)).count() \
+                or SUCCESS_RX.search(page.inner_text("body")[:8000]):
             return ApplyResult("applied", "Handshake already shows this job as applied.")
         return ApplyResult("needs_manual", "Couldn't find an Apply button.")
-    label = (apply_btn.first.inner_text() or "").lower()
-    if "external" in label:
-        return ApplyResult("needs_manual", "This job is applied for on the employer's own site.")
 
-    apply_btn.first.click()
+    buttons.first.click()
     _pause(2, 4)
     if (b := _blocker(page)):
         return ApplyResult("needs_manual", b)
 
     dialog = page.get_by_role("dialog")
-    scope = dialog.first if dialog.count() else page
+    if dialog.count() == 0:
+        return ApplyResult("needs_manual", "The application form didn't open.")
+    scope = dialog.first
+    upload = _upload_copy(Path(resume_pdf), upload_name)
 
+    # Handshake pre-attaches a resume saved on your profile; remove it so ours is the one sent.
+    attached = scope.locator("button.rosetta-inline-alert__close-button")
+    if attached.count():
+        attached.first.click()
+        _pause(1.5, 2.5)
     file_inputs = scope.locator("input[type=file]")
-    if file_inputs.count():
-        file_inputs.first.set_input_files(str(resume_pdf))
-        _pause(3, 5)
+    if file_inputs.count() == 0:
+        return ApplyResult("needs_manual", "No resume upload option found in the application form.")
+    file_inputs.first.set_input_files(str(upload))
+    # wait until Handshake shows our file as attached AND has finished processing it
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        text = scope.inner_text()
+        busy = re.search(r"converting|uploading|processing", text, re.I)
+        if upload.name in text and not busy and scope.locator("button.rosetta-inline-alert__close-button").count():
+            break
+        time.sleep(1.5)
     else:
-        return ApplyResult("needs_manual", "No resume upload field found in the application form.")
+        return ApplyResult("needs_manual", "Handshake didn't finish processing the resume upload. Check this job on Handshake.")
+    _pause(1.5, 2.5)
 
     # Extra required questions/documents we can't answer safely -> hand off to you.
     empty_required = scope.locator(
@@ -350,10 +385,17 @@ def apply(url: str, resume_pdf: Path, dry_run: bool = True) -> ApplyResult:
         return ApplyResult("ready", "Dry run: everything was filled in and the agent stopped before Submit. Turn off dry run in Settings to submit for real.")
 
     submit.first.click()
-    _pause(3, 5)
+    _pause(4, 6)
     if (b := _blocker(page)):
         return ApplyResult("needs_manual", b)
     if SUCCESS_RX.search(page.inner_text("body")[:10000]):
+        return ApplyResult("applied", "Submitted on Handshake.")
+    # Check the posting itself: once applied, Handshake swaps the Apply button for an Applied state.
+    page.reload(wait_until="domcontentloaded")
+    _pause(3, 5)
+    body = page.inner_text("body")[:10000]
+    if page.get_by_role("button", name=APPLY_BTN_RX).count() == 0 and (
+            SUCCESS_RX.search(body) or re.search(r"\bapplied\b|withdraw", body, re.I)):
         return ApplyResult("applied", "Submitted on Handshake.")
     return ApplyResult("needs_manual", "Clicked Submit but couldn't confirm it went through. Check this job on Handshake.")
 

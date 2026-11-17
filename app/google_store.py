@@ -330,7 +330,7 @@ def add_project(doc_id: str, after_text: str, title_sample: str, bullet_sample: 
 # ---------------- Sheet ----------------
 def sheet_row(job, app, resume_link: str = "", branch: str = "") -> list:
     return [
-        app.applied_at.strftime("%Y-%m-%d %H:%M"),
+        app.applied_at.astimezone().strftime("%Y-%m-%d %H:%M"),   # your local time
         job.company,
         job.title,
         job.location,

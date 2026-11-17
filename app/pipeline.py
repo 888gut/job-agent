@@ -492,6 +492,23 @@ def resume_pdf_for(job: Job) -> Path | None:
     return master_pdf(r)  # .docx base resume: send the PDF export of its Doc
 
 
+def upload_name_for(job: Job) -> str:
+    """File name the employer sees, e.g. 'First_Last_Resume.pdf', from the name on the resume."""
+    r = current_resumes().get(job.resume_slot or "A")
+    name = ""
+    try:
+        if r and Path(r.path).suffix.lower() == ".pdf":
+            first = parse_layout(r.path).blocks[0]
+            if first.kind == "name":
+                name = first.text
+    except Exception:
+        pass
+    if not name and r:
+        name = (r.text.strip().splitlines() or [""])[0]
+    name = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
+    return f"{name}_Resume.pdf" if name and len(name) <= 40 else "Resume.pdf"
+
+
 def approve(job_id: int) -> dict:
     settings = get_settings()
     if applied_today() >= int(settings["daily_cap"]):
@@ -522,7 +539,7 @@ def approve(job_id: int) -> dict:
 
     log(f"Applying to {job.title} at {job.company}{' (dry run)' if settings['dry_run'] else ''}", "info", job_id)
     try:
-        result = _hs(handshake.apply, job.url, pdf, bool(settings["dry_run"]))
+        result = _hs(handshake.apply, job.url, pdf, bool(settings["dry_run"]), upload_name_for(job))
     except Exception as e:
         _set_status(job_id, "failed", str(e))
         log(f"Apply failed for {job.company}: {e}", "error", job_id)

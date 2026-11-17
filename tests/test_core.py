@@ -418,7 +418,7 @@ def test_sheet_row_format():
                           resume_slot="B", tailored=True, score=74, status="Submitted")
     row = google_store.sheet_row(job, app, "https://docs/x", "E-commerce data analyst")
     assert len(row) == len(google_store.SHEET_HEADER)
-    assert row[:3] == ["2026-11-17 09:30", "Contoso", "Analyst"]
+    assert row[:3] == [app.applied_at.astimezone().strftime("%Y-%m-%d %H:%M"), "Contoso", "Analyst"]
     assert row[5:10] == ["Resume B", "Yes", "E-commerce data analyst", 74, "Submitted"]
     assert google_store.SHEET_HEADER[ord(google_store.STATUS_COL) - ord("A")] == "Status"
 
