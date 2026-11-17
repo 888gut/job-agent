@@ -15,9 +15,15 @@ function Get-Server {
         $p = Get-Process -Id $id -ErrorAction SilentlyContinue
         if ($p) { return $p }
     }
-    # also catch a server started some other way on port 8765
+    # also catch a Job Agent server started some other way on port 8765 (only ours, never another program)
+    $owner = Get-PortOwner
+    if ($owner -and $owner.CommandLine -match "uvicorn.+app\.main:app") { return Get-Process -Id $owner.ProcessId -ErrorAction SilentlyContinue }
+    return $null
+}
+
+function Get-PortOwner {
     $conn = Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($conn) { return Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue }
+    if ($conn) { return Get-CimInstance Win32_Process -Filter "ProcessId=$($conn.OwningProcess)" -ErrorAction SilentlyContinue }
     return $null
 }
 
@@ -30,6 +36,8 @@ function Stop-Server {
 
 function Start-Server {
     if (Get-Server) { "The Job Agent server is already running at http://127.0.0.1:8765"; return }
+    $other = Get-PortOwner
+    if ($other) { "Port 8765 is in use by another program (process $($other.ProcessId): $($other.CommandLine)). Close it, then start the Job Agent again."; return }
     New-Item -ItemType Directory -Force (Split-Path $log) | Out-Null
     $p = Start-Process -FilePath $python -WorkingDirectory $root -WindowStyle Hidden -PassThru `
         -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8765" `
