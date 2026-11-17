@@ -134,8 +134,17 @@ def overview():
         apps = s.exec(select(Application)).all()
         counts = dict(s.exec(select(Job.status, func.count()).group_by(Job.status)).all())
         avg = s.exec(select(func.avg(Job.score)).where(Job.status.in_(["queued", "applied", "needs_manual"]))).one()
+        jobs = {j.id: j for j in s.exec(select(Job).where(Job.id.in_([a.job_id for a in apps])))}
     sj = scheduler.get_job(SEARCH_JOB_ID)
+    st = get_settings()
     return {
+        "gmail_email": st.get("gmail_email"),
+        "gmail_checked_at": st.get("gmail_checked_at"),
+        "interview_alerts": [{
+            "id": a.id, "company": jobs[a.job_id].company, "title": jobs[a.job_id].title,
+            "status": a.status, "note": a.email_note, "link": a.email_link,
+        } for a in apps if a.status in ("Interview", "Offer") and not a.is_demo and a.job_id in jobs],
+        "unverified": sum(1 for a in apps if not a.is_demo and not a.email_verified),
         "applied_week": sum(1 for a in apps if a.applied_at >= week_ago),
         "applied_total": len(apps),
         "applied_today": pipeline.applied_today(),
@@ -296,7 +305,8 @@ def applications():
             "title": j.title, "location": j.location, "url": j.url, "resume_slot": a.resume_slot,
             "tailored": a.tailored, "score": a.score, "status": a.status, "doc_url": a.drive_url,
             "branch": j.branch if a.tailored else "",
-            "is_demo": a.is_demo,
+            "is_demo": a.is_demo, "email_verified": a.email_verified,
+            "email_note": a.email_note, "email_link": a.email_link,
         } for a, j in rows],
     }
 
@@ -541,6 +551,9 @@ async def connect(account: str):
             None, lambda: google_store.credentials(account, interactive=True))
         if account == "storage":
             await asyncio.get_running_loop().run_in_executor(None, google_store.ensure_sheet)
+        else:
+            email = await asyncio.get_running_loop().run_in_executor(None, google_store.account_email, account)
+            save_settings({"gmail_email": email})
         log(f"Connected Google account ({account}).", "success")
         return {"ok": True}
     except Exception as e:
@@ -550,6 +563,8 @@ async def connect(account: str):
 @app.post("/api/disconnect/{account}")
 def disconnect(account: str):
     google_store.disconnect(account)
+    if account == "handshake_gmail":
+        save_settings({"gmail_email": None})
     return {"ok": True}
 
 
@@ -575,8 +590,13 @@ async def handshake_status():
 @app.post("/api/gmail/check")
 async def gmail_check():
     try:
-        n = await asyncio.get_running_loop().run_in_executor(None, gmail_watch.check)
-        return {"ok": True, "message": f"{n} application(s) updated from email."}
+        r = await asyncio.get_running_loop().run_in_executor(None, gmail_watch.check)
+        return {"ok": True, **r, "message": (
+            f"Checked {r['scanned']} new email(s): {r['updated']} status change(s), "
+            f"{r['filed']} filed to Submitted, {r['interviews']} interview email(s). "
+            f"{r['unverified']} application(s) still without a confirmation email.")}
+    except google_store.NotConnected:
+        return {"ok": False, "message": "Connect your Handshake Gmail in Settings first."}
     except Exception as e:
         return {"ok": False, "message": str(e)}
 

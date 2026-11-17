@@ -19,7 +19,7 @@ STORAGE_SCOPES = [
     "openid",
 ]
 GMAIL_SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",   # read + label/archive; the app never sends or deletes
     "https://www.googleapis.com/auth/userinfo.email",
     "openid",
 ]
@@ -366,3 +366,13 @@ def update_status(sheet_row_num: int, status: str) -> None:
         spreadsheetId=sid, range=f"Applications!{STATUS_COL}{sheet_row_num}",
         valueInputOption="RAW", body={"values": [[status]]},
     ).execute()
+
+
+def update_statuses(changes: dict[int, str]) -> None:
+    """Write several Status cells in one request. `changes` maps sheet row -> status."""
+    if not changes:
+        return
+    _sheets().spreadsheets().values().batchUpdate(spreadsheetId=ensure_sheet(), body={
+        "valueInputOption": "RAW",
+        "data": [{"range": f"Applications!{STATUS_COL}{row}", "values": [[st]]} for row, st in changes.items()],
+    }).execute()

@@ -774,3 +774,45 @@ def test_same_branch_tailoring_is_not_duplicated_when_parallel(monkeypatch, resu
     assert len(plans) == 1                                 # one Claude call, one Doc; the others reuse it
     with session() as s:
         assert len({s.get(Job, i).tailored_id for i in ids}) == 1
+
+
+# ---------------- Gmail sync ----------------
+def _mail(mid, day, labels=("INBOX",)):
+    return {"id": mid, "thread": f"t{mid}", "labels": list(labels), "from": "", "to": "",
+            "subject": "", "snippet": "", "date": datetime(2026, 11, day, tzinfo=timezone.utc)}
+
+
+def test_gmail_apply_verdicts_orders_and_files():
+    from app.db import Application
+    V = gmail_watch.EmailVerdict
+    a1 = Application(id=1, job_id=1, status="Submitted")
+    a2 = Application(id=2, job_id=2, status="Submitted")
+    a3 = Application(id=3, job_id=3, status="Submitted")
+    msgs = [_mail("c1", 17), _mail("i1", 18), _mail("r1", 20), _mail("s3", 17, ("SENT",)), _mail("x", 19)]
+    verdicts = [
+        V(message_id="r1", application_id=1, category="rejection", note="Closed"),   # newer, listed first
+        V(message_id="c1", application_id=1, category="confirmation", note="Received"),
+        V(message_id="i1", application_id=2, category="interview", note="Pick a time"),
+        V(message_id="s3", application_id=3, category="sent_application", note="Sent resume"),
+        V(message_id="x", application_id=0, category="other", note="Job alert"),
+    ]
+    res = gmail_watch.apply_verdicts([a1, a2, a3], msgs, verdicts, "me@example.com")
+    assert a1.status == "Rejected" and a1.email_verified          # newest outcome wins over confirmation
+    assert a2.status == "Interview" and not a2.email_verified
+    assert a3.status == "Submitted" and a3.email_verified         # sent mail verifies, doesn't "confirm"
+    assert res["submitted"] == ["c1", "s3"] and res["interviews"] == ["i1"]
+    assert a2.email_link.endswith("#all/ti1") and "authuser=me@example.com" in a2.email_link
+    assert set(res["changed"]) == {1, 2, 3}
+
+
+def test_gmail_confirmation_never_downgrades_interview():
+    from app.db import Application
+    a = Application(id=1, job_id=1, status="Interview")
+    gmail_watch.apply_verdicts([a], [_mail("c", 20)],
+                               [gmail_watch.EmailVerdict(message_id="c", application_id=1, category="confirmation", note="")])
+    assert a.status == "Interview" and a.email_verified
+
+
+def test_gmail_query():
+    q = gmail_watch.build_query(['Zippo', 'B "Square"', "", "Zippo"], datetime(2026, 11, 16))
+    assert q == 'after:2026/11/16 (from:joinhandshake.com OR "B Square" OR "Zippo") -in:chats'

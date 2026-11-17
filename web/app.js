@@ -118,12 +118,22 @@ function setCrumbs(page) {
     if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
 }
+const gmailUrl = (email) => `https://mail.google.com/mail/u/${email ? `?authuser=${encodeURIComponent(email)}` : "0/"}`;
+async function checkGmail(btn) {
+  await withBusy(btn, "Checking Gmail…", async () => { const r = await post("/api/gmail/check"); toast(r.message, r.ok); });
+  route();
+}
+
 async function refreshChrome() {
   try {
     const o = await api("/api/overview");
     const c = $("#queueCount"); c.hidden = !o.awaiting; c.textContent = o.awaiting;
     const fc = $("#factCount"); fc.hidden = !o.facts_pending; fc.textContent = o.facts_pending;
     $("#demoBar").style.display = o.demo ? "" : "none";
+    const gb = $("#gmailBadge"), n = o.interview_alerts.length;
+    gb.hidden = !n; gb.textContent = n;
+    $("#gmailBtn").onclick = () => window.open(gmailUrl(o.gmail_email), "_blank", "noopener");
+    $("#gmailBtn").title = o.gmail_email ? `Open ${o.gmail_email} in a new tab` : "Open Gmail (connect your Handshake Gmail in Settings to open that account directly)";
     const r = o.run;
     $("#runStatus").innerHTML = r.running ? `<span class="busy"></span> ${esc(r.stage)}`
       : o.next_run ? `Next search ${fmtTime(o.next_run)}` : (r.last_run ? `Last search ${ago(r.last_run)}` : "Ready");
@@ -163,6 +173,11 @@ render.overview = async () => {
   view.innerHTML = `
     <h1>Good ${new Date().getHours() < 12 ? "morning" : new Date().getHours() < 18 ? "afternoon" : "evening"}</h1>
     <p class="subtitle">Here's where your job search stands.</p>
+    ${o.interview_alerts.length ? `<div class="interview-alert" role="status">
+      <strong>${o.interview_alerts.length === 1 ? "An employer wants to talk to you" : `${o.interview_alerts.length} employers want to talk to you`}</strong>
+      <ul>${o.interview_alerts.map((a) => `<li><span class="pill ${esc(a.status)}">${esc(a.status)}</span> ${esc(a.company)}, ${esc(a.title)}${a.note ? ` <span class="muted">· ${esc(a.note)}</span>` : ""}${a.link ? ` · <a href="${esc(a.link)}" target="_blank" rel="noopener">Open email</a>` : ""}</li>`).join("")}</ul></div>` : ""}
+    <div class="toolbar"><button class="btn small" id="ovGmail">Check Gmail now</button>
+      <span class="muted small">${o.gmail_email ? (o.gmail_checked_at ? `Last checked ${ago(o.gmail_checked_at)}` : "Not checked yet") : "Handshake Gmail not connected (Settings)"}${o.unverified ? ` · ${o.unverified} application(s) without a confirmation email` : ""}</span></div>
     <div class="gadgets">
       <div class="gadget g-green"><div class="label">Applied this week</div><div class="value">${o.applied_week}</div><div class="hint">${o.applied_total} total</div></div>
       <div class="gadget g-blue"><div class="label">Awaiting your approval</div><div class="value">${o.awaiting}</div><div class="hint"><a href="#/queue">Review now</a></div></div>
@@ -193,6 +208,7 @@ render.overview = async () => {
         </div></div>
       </div>
     </div>`;
+  $("#ovGmail").onclick = (e) => checkGmail(e.currentTarget);
   $("#ovRun").onclick = async (e) => { await withBusy(e.currentTarget, "Starting…", async () => { const r = await post("/api/run"); toast(r.message, r.ok); }); setTimeout(route, 800); };
 };
 
@@ -416,7 +432,9 @@ render.applications = async () => {
       <td class="nowrap" title="${esc(toDate(a.applied_at)?.toLocaleString())}">${fmtDate(a.applied_at)}</td>
       <td class="nowrap"><span class="pill slot">${esc(a.resume_slot)}</span> ${a.tailored ? `<span class="pill tailored" title="${esc(a.branch)}">Tailored</span>` : ""}</td>
       <td style="width:150px">${meter(a.score)}</td>
-      <td><select data-app="${a.id}" class="stSel" aria-label="${esc(`Status for ${a.title} at ${a.company}`)}">${STATUSES.map((s) => `<option ${s === a.status ? "selected" : ""}>${s}</option>`).join("")}</select></td>
+      <td><select data-app="${a.id}" class="stSel" aria-label="${esc(`Status for ${a.title} at ${a.company}`)}">${STATUSES.map((s) => `<option ${s === a.status ? "selected" : ""}>${s}</option>`).join("")}</select>
+        ${a.status === "Interview" || a.status === "Offer" ? ` <span class="pill ${esc(a.status)}">New: ${esc(a.status)}</span>` : ""}
+        <div class="small">${a.email_verified ? '<span class="ok-text" title="A confirmation email was found in Gmail">&#10003; Email confirmed</span>' : '<span class="muted" title="No confirmation email found in Gmail yet">No confirmation email</span>'}${a.email_link ? ` · <a href="${esc(a.email_link)}" target="_blank" rel="noopener" title="${esc(a.email_note)}">Email</a>` : ""}</div></td>
       <td class="nowrap">${a.doc_url ? `<a href="${esc(a.doc_url)}" target="_blank" rel="noopener">Google Doc</a>` : '<span class="muted">Original</span>'}</td></tr>`).join("")
       : `<tr><td colspan="7"><div class="empty">${filtered
         ? `<div class="big">No matching applications</div>Try a different filter. <button class="linkbtn" id="clearFilter">Clear filter</button>`
@@ -599,7 +617,7 @@ render.settings = async () => {
           `<button class="btn small" id="hsCheck">Check</button><button class="btn small primary" id="hsLogin">Sign in to Handshake</button>`),
         conn(c.storage.connected, "Storage Gmail (Sheet, Docs, Drive)", c.storage.connected ? `Connected as ${esc(c.storage.email || "?")}${c.storage.sheet_url ? ` · <a href="${esc(c.storage.sheet_url)}" target="_blank" rel="noopener">Open Sheet</a>` : ""}` : (c.google_client_file ? "Application log (Sheet) and tailored resumes (Google Docs)." : "Add credentials.json first (see SETUP.md)."),
           c.storage.connected ? `<button class="btn small" data-dis="storage">Disconnect</button>` : `<button class="btn small" data-con="storage" ${c.google_client_file ? "" : "disabled"}>Connect</button>`),
-        conn(c.handshake_gmail.connected, "Handshake Gmail (read-only)", c.handshake_gmail.connected ? `Connected as ${esc(c.handshake_gmail.email || "?")} · checks every 30 min` : "Optional: reads Handshake emails to update statuses.",
+        conn(c.handshake_gmail.connected, "Handshake Gmail", c.handshake_gmail.connected ? `Connected as ${esc(c.handshake_gmail.email || "?")} · checks every 30 min, files confirmations under Job Agent/Submitted and interviews under Job Agent/Interviews` : "Reads application emails to update statuses and files them under Job Agent labels. Never sends or deletes mail.",
           c.handshake_gmail.connected ? `<button class="btn small" id="gmCheck">Check now</button><button class="btn small" data-dis="handshake_gmail">Disconnect</button>` : `<button class="btn small" data-con="handshake_gmail" ${c.google_client_file ? "" : "disabled"}>Connect</button>`),
       ].join("") : `<div class="empty" style="padding:20px 10px">Couldn't load connection status.</div>`}
     </div></div>
@@ -651,7 +669,7 @@ render.settings = async () => {
       toast(r.logged_in ? "Signed in to Handshake." : "Not signed in yet.", r.logged_in);
     });
   });
-  $("#gmCheck")?.addEventListener("click", (e) => withBusy(e.currentTarget, "Checking…", async () => { const r = await post("/api/gmail/check"); toast(r.message, r.ok); }));
+  $("#gmCheck")?.addEventListener("click", (e) => checkGmail(e.currentTarget));
   view.querySelectorAll("[data-con]").forEach((b) => b.onclick = async () => {
     busy(b, true, "Waiting for Google…"); toast("A Google sign-in page opened in your browser. Pick the right account there.");
     try { const r = await post(`/api/connect/${b.dataset.con}`); toast(r.ok ? "Connected." : r.message, r.ok); }

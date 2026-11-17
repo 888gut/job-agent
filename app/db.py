@@ -109,6 +109,9 @@ class Application(SQLModel, table=True):
     sheet_row: Optional[int] = None
     drive_url: Optional[str] = None
     is_demo: bool = False
+    email_verified: bool = False             # Gmail has a confirmation (or the user's sent application)
+    email_note: str = ""                     # latest relevant email, e.g. "Nov 18: Recruiter asks for times"
+    email_link: str = ""                     # Gmail link to that thread
 
 
 class Setting(SQLModel, table=True):
