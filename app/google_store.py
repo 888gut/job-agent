@@ -190,7 +190,9 @@ def _common_prefix(a: str, b: str) -> str:
     while n < min(len(a), len(b)) and a[n] == b[n]:
         n += 1
     if n < len(a) or n < len(b):  # back off to a word boundary
-        cut = a.rfind(" ", 0, n + 1)
+        # back off to the last space INSIDE the shared part (a[:n]); searching up to n+1 could
+        # pick a space that only `a` has at position n, which dropped e.g. an inserted comma
+        cut = a.rfind(" ", 0, n)
         n = cut + 1 if cut >= 0 else 0
     return a[:n]
 

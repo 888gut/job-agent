@@ -144,7 +144,9 @@ def parse(pdf_path: str | Path) -> Layout:
         if (blocks and cont_x is not None and st == "regular" and not is_bullet
                 and abs(first["bbox"][0] - cont_x) < 2.5 and top - tops[-1][1] < body_size * 1.45):
             b = blocks[-1]
-            b.text = f"{b.text} {_join(r)}"
+            nxt = _join(r)
+            # a line that ends in a hyphenated word ("data-" / "informed") joins without a space
+            b.text = f"{b.text}{nxt}" if re.search(r"[A-Za-z]-$", b.text) else f"{b.text} {nxt}"
             b.lines += 1
             tops[-1] = (tops[-1][0], top)
             continue

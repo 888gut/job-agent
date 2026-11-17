@@ -323,6 +323,48 @@ def test_project_requests_copy_styles_and_insert_after_last_project():
     assert tstyles[2].get("bold") is None                                   # bullet text regular
 
 
+def _apply_requests(text, reqs, start=1):
+    """Apply delete/insert requests to plain text the way the Docs API would."""
+    for r in reqs:
+        if "deleteContentRange" in r:
+            rg = r["deleteContentRange"]["range"]
+            text = text[: rg["startIndex"] - start] + text[rg["endIndex"] - start:]
+        elif "insertText" in r:
+            i = r["insertText"]["location"]["index"] - start
+            text = text[:i] + r["insertText"]["text"] + text[i:]
+    return text
+
+
+@pytest.mark.parametrize("old,new", [
+    ("Helped shoppers choose bikes based on how they ride.",
+     "Helped shoppers choose bikes, matching frames and gears to how they ride."),
+    ("Analyzed regional sales data to inform restocking.",
+     "Analyzed regional sales data, tracking weekly sell-through to inform restocking."),
+    ("Built dashboards in Excel for the team.", "Built Excel dashboards for the team."),
+    ("Trained 6 new hires on checkout procedures.", "Trained 6 new hires on checkout and returns procedures."),
+])
+def test_edit_requests_produce_exactly_the_new_text(old, new):
+    doc = _doc([(old + "\n", PLAIN)])
+    reqs, missing = google_store.edit_requests(doc, [{"old": old, "new": new}])
+    assert missing == []
+    assert _apply_requests(old + "\n", reqs) == new + "\n"   # punctuation such as commas is kept
+
+
+def test_hyphen_at_line_end_rejoins_without_space(tmp_path):
+    doc = pymupdf.open()
+    p = doc.new_page(width=612, height=792)
+    p.insert_text((49, 104), "SKILLS", fontname="tibo", fontsize=11)
+    p.insert_text((65, 130), "•", fontname="helv", fontsize=10)
+    p.insert_text((75, 130), "Reviewed weekly sales across all store locations to drive data-", fontname="tiro", fontsize=10)
+    p.insert_text((75, 142), "informed buying and restocking decisions.", fontname="tiro", fontsize=10)
+    path = tmp_path / "h.pdf"
+    doc.save(str(path))
+    lay = layout.parse(path)
+    bullet = next(b for b in lay.blocks if b.kind == "bullet")
+    assert bullet.lines == 2
+    assert "drive data-informed buying" in bullet.text   # no stray space after the line-end hyphen
+
+
 def test_edit_requests_reports_missing_text():
     doc = _doc([("Hello world\n", PLAIN)])
     _, missing = google_store.edit_requests(doc, [{"old": "Not in doc", "new": "x"}])
