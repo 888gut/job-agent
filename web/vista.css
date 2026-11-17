@@ -269,14 +269,26 @@ a:hover { text-decoration: underline; }
 }
 .meter > i {
   position: absolute; inset: 0 auto 0 0; border-right: 1px solid rgba(0,0,0,0.15);
+  overflow: hidden;                       /* the shine stays inside the filled part */
   background: linear-gradient(180deg, #c9f5b0 0%, #6fd64b 45%, #3cb31a 46%, #69d443 100%);
 }
-.meter > i::after { /* the moving highlight Vista bars had */
-  content: ""; position: absolute; top: 0; bottom: 0; width: 60px; left: -60px;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.65), transparent);
-  animation: sheen 2.6s ease-in-out infinite;
+.meter > i[style*="width:0%"], .meter > i[style*="width: 0%"] { border-right: 0; }
+/* The Vista shine: a soft glow that glides the whole length of the fill, all the way past the
+   end, rests, then glides again. Moved with transform so it stays smooth. */
+.meter > i::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 45%;
+  background: linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.18) 30%,
+              rgba(255,255,255,0.42) 50%, rgba(255,255,255,0.18) 70%, rgba(255,255,255,0) 100%);
+  transform: translateX(-100%);
+  animation: sheen 5s cubic-bezier(0.45, 0, 0.25, 1) infinite;
+  will-change: transform;
 }
-@keyframes sheen { to { left: 110%; } }
+@keyframes sheen {
+  0%   { transform: translateX(-100%); }
+  62%  { transform: translateX(222%); }   /* fully past the end of the fill (100% / 45%) */
+  100% { transform: translateX(222%); }   /* rest before the next glide */
+}
+@media (prefers-reduced-motion: reduce) { .meter > i::after { animation: none; opacity: 0; } }
 .meter.amber > i { background: linear-gradient(180deg, #fbe7a6 0%, #f0c33c 45%, #dda512 46%, #f2c94a 100%); }
 .meter.red > i { background: linear-gradient(180deg, #f8b9a8 0%, #e25b3d 45%, #c93a1c 46%, #e7684a 100%); }
 .meter-row { display: flex; align-items: center; gap: 8px; }
