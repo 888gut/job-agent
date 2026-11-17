@@ -295,8 +295,10 @@ a:hover { text-decoration: underline; }
 .listview th {
   text-align: left; font-weight: 400; color: #4c607a; padding: 4px 10px; white-space: nowrap; cursor: default;
   border-bottom: 1px solid var(--line); border-right: 1px solid #e3e8ee;
-  background: linear-gradient(180deg, #ffffff 0%, #f3f6fa 100%); position: sticky; top: 0; z-index: 1;
+  background: linear-gradient(180deg, #ffffff 0%, #f3f6fa 100%);
 }
+/* Headers only stay pinned inside a table's own scroll box; on the page they scroll away naturally. */
+.table-wrap .listview th { position: sticky; top: 0; z-index: 1; }
 :root[data-theme="dark"] .listview th { color: #a9bdd2; background: linear-gradient(180deg, #213041 0%, #1b2836 100%); border-right-color: #2c3c4e; }
 .listview th[data-k] { cursor: pointer; }
 .listview th[data-k]:hover { background: linear-gradient(180deg, #f2f8fe 0%, #dcecfc 100%); }
@@ -453,12 +455,23 @@ textarea { width: 100%; min-height: 84px; resize: vertical; }
 }
 .toast.show { display: flex; animation: pop .2s ease-out; }
 
-/* spinner (Vista busy ring) */
-.busy { width: 14px; height: 14px; border-radius: 50%; display: inline-block; vertical-align: -2px;
-  background: conic-gradient(#2fa4ff, #2fa4ff 25%, transparent 25%, transparent 50%, #6cc6ff 50%, #6cc6ff 60%, transparent 60%);
-  -webkit-mask: radial-gradient(circle, transparent 4px, #000 5px); mask: radial-gradient(circle, transparent 4px, #000 5px);
-  animation: spin 0.9s linear infinite; }
+/* spinner: a calm ring — faint track plus a soft arc that fades in from its tail, turning slowly */
+:root { --spin: 47, 128, 204; }
+:root[data-theme="dark"] { --spin: 130, 196, 255; }
+.busy {
+  --ring: 2px;
+  width: 14px; height: 14px; border-radius: 50%; display: inline-block; vertical-align: -2px; flex-shrink: 0;
+  background:
+    conic-gradient(from 0deg, rgba(var(--spin), 0) 0deg, rgba(var(--spin), .12) 120deg, rgba(var(--spin), .55) 260deg, rgba(var(--spin), .95) 352deg, rgba(var(--spin), 0) 360deg),
+    rgba(var(--spin), .12);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring) - 0.5px), #000 calc(100% - var(--ring)));
+  mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring) - 0.5px), #000 calc(100% - var(--ring)));
+  animation: spin 1.6s linear infinite;
+  will-change: transform;
+}
+.cmdbar .busy { --spin: 255, 255, 255; }   /* on the dark command bar */
 @keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .busy { animation-duration: 3.2s; } }
 
 .muted { color: var(--text-dim); }
 .mt { margin-top: 14px; }
@@ -490,7 +503,7 @@ a.btn, a.btn:hover { text-decoration: none; }
 
 /* ---------------- Loading / toast variants ---------------- */
 .loading { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 70px 10px; color: var(--text-dim); }
-.busy.lg { width: 22px; height: 22px; -webkit-mask: radial-gradient(circle, transparent 6px, #000 7px); mask: radial-gradient(circle, transparent 6px, #000 7px); }
+.busy.lg { width: 24px; height: 24px; --ring: 2.5px; animation-duration: 1.8s; }
 .toast { cursor: pointer; }
 .toast .icon { margin-top: 1px; }
 .toast.error { border-left: 3px solid #c93a1c; }
