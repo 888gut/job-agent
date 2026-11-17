@@ -116,6 +116,8 @@ function setCrumbs(page) {
     const on = a.dataset.page === page;
     a.classList.toggle("active", on);
     if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    // On a phone the nav is a scrolling taskbar: keep the current page's button in view.
+    if (on && matchMedia("(max-width: 720px)").matches) a.scrollIntoView({ inline: "nearest", block: "nearest" });
   });
 }
 const gmailUrl = (email) => `https://mail.google.com/mail/u/${email ? `?authuser=${encodeURIComponent(email)}` : "0/"}`;
@@ -613,7 +615,7 @@ render.settings = async () => {
     <div class="panel"><div class="panel-head">Connections</div><div class="panel-body" style="padding:0 12px">
       ${c ? [
         conn(c.anthropic, "Claude API", c.anthropic ? "API key found in .env" : "Add ANTHROPIC_API_KEY to the .env file, then restart.", ""),
-        conn(false, "Handshake", "Sign in once in the agent's own browser window. Your password is never stored.",
+        conn(false, "Handshake", "Sign in once in the agent's own Chrome window (a Chrome profile named \"Job Agent\", separate from your everyday Chrome, so the agent can apply for you). Your password is never stored.",
           `<button class="btn small" id="hsCheck">Check</button><button class="btn small primary" id="hsLogin">Sign in to Handshake</button>`),
         conn(c.storage.connected, "Storage Gmail (Sheet, Docs, Drive)", c.storage.connected ? `Connected as ${esc(c.storage.email || "?")}${c.storage.sheet_url ? ` · <a href="${esc(c.storage.sheet_url)}" target="_blank" rel="noopener">Open Sheet</a>` : ""}` : (c.google_client_file ? "Application log (Sheet) and tailored resumes (Google Docs)." : "Add credentials.json first (see SETUP.md)."),
           c.storage.connected ? `<button class="btn small" data-dis="storage">Disconnect</button>` : `<button class="btn small" data-con="storage" ${c.google_client_file ? "" : "disabled"}>Connect</button>`),
@@ -659,7 +661,7 @@ render.settings = async () => {
     refreshChrome();
   });
   $("#loadDemo").onclick = (e) => withBusy(e.currentTarget, "Loading…", async () => { await post("/api/demo/load"); toast("Sample data loaded."); refreshChrome(); });
-  $("#hsLogin")?.addEventListener("click", (e) => withBusy(e.currentTarget, "Opening…", async () => { const r = await post("/api/handshake/login"); toast(r.message); }));
+  $("#hsLogin")?.addEventListener("click", (e) => withBusy(e.currentTarget, "Opening…", async () => { const r = await post("/api/handshake/login"); toast(r.message, r.ok); }));
   $("#hsCheck")?.addEventListener("click", (e) => {
     const btn = e.currentTarget;
     return withBusy(btn, "Checking…", async () => {

@@ -570,9 +570,13 @@ def disconnect(account: str):
 
 @app.post("/api/handshake/login")
 async def handshake_login():
+    # Signing in reopens the agent's browser profile in a normal Chrome window, which closes the
+    # agent's own window, so never do it in the middle of a search or an application run.
+    if pipeline.batch["running"] or pipeline.state["running"]:
+        return {"ok": False, "message": "The agent is busy using Handshake right now. Sign in after it finishes (or click Stop)."}
     try:
-        await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.open_login)), timeout=90)
-        return {"ok": True, "message": "A Chrome window opened. Sign in to Handshake there, then close that window and click Check."}
+        msg = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.open_login)), timeout=90)
+        return {"ok": True, "message": msg}
     except Exception as e:
         log(f"Couldn't open the Handshake browser: {e}", "error")
         return {"ok": False, "message": str(e)}

@@ -6,7 +6,7 @@
   <title>Job Agent</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%2398d4ff'/%3E%3Cstop offset='1' stop-color='%231c5aa3'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='3' y='9' width='26' height='19' rx='3' fill='url(%23g)'/%3E%3Cpath d='M11 9V6a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v3' fill='none' stroke='%231c5aa3' stroke-width='2.5'/%3E%3C/svg%3E">
   <script>try { if (localStorage.getItem("theme") === "dark") document.documentElement.dataset.theme = "dark"; } catch (e) {}</script>
-  <link rel="stylesheet" href="vista.css?v=10">
+  <link rel="stylesheet" href="vista.css?v=11">
 </head>
 <body>
   <!-- inline SVG icon sprite -->
@@ -57,9 +57,9 @@
 
     <div class="client">
       <div class="cmdbar">
-        <button id="runBtn"><svg class="icon" style="width:16px;height:16px" aria-hidden="true"><use href="#i-play"/></svg>Run search now</button>
+        <button id="runBtn"><svg class="icon" style="width:16px;height:16px" aria-hidden="true"><use href="#i-play"/></svg><span class="lg">Run search now</span><span class="sm">Search</span></button>
         <button class="hide-phone" onclick="location.hash='#/queue'">Review queue</button>
-        <button id="gmailBtn" class="gmail-btn" title="Open your Handshake Gmail in a new tab"><svg class="icon" style="width:16px;height:16px" aria-hidden="true" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="2" fill="#fff" stroke="#b3261e"/><path d="m3.5 6.5 8.5 6.5 8.5-6.5" fill="none" stroke="#d93025" stroke-width="2" stroke-linejoin="round"/></svg>Open Gmail<span class="badge" id="gmailBadge" hidden></span></button>
+        <button id="gmailBtn" class="gmail-btn" title="Open your Handshake Gmail in a new tab"><svg class="icon" style="width:16px;height:16px" aria-hidden="true" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="2" fill="#fff" stroke="#b3261e"/><path d="m3.5 6.5 8.5 6.5 8.5-6.5" fill="none" stroke="#d93025" stroke-width="2" stroke-linejoin="round"/></svg><span class="lg">Open Gmail</span><span class="sm">Gmail</span><span class="badge" id="gmailBadge" hidden></span></button>
         <button id="sheetBtn" style="display:none">Open Google Sheet</button>
         <div class="spacer"></div>
         <span class="status-text" id="runStatus" aria-live="polite"></span>
@@ -73,16 +73,16 @@
       <div class="body">
         <nav class="navpane" id="nav" aria-label="Pages">
           <h4>Job Agent</h4>
-          <a href="#/overview" data-page="overview"><svg class="icon"><use href="#i-home"/></svg>Overview</a>
-          <a href="#/queue" data-page="queue"><svg class="icon"><use href="#i-queue"/></svg>Approval Queue<span class="count" id="queueCount" hidden>0</span></a>
-          <a href="#/applications" data-page="applications"><svg class="icon"><use href="#i-list"/></svg>Applications</a>
-          <a href="#/resumes" data-page="resumes"><svg class="icon"><use href="#i-doc"/></svg>Resumes &amp; Transcript</a>
-          <a href="#/facts" data-page="facts"><svg class="icon"><use href="#i-star"/></svg>Career Facts<span class="count" id="factCount" hidden>0</span></a>
-          <a href="#/github" data-page="github"><svg class="icon"><use href="#i-code"/></svg>GitHub</a>
+          <a href="#/overview" data-page="overview"><svg class="icon"><use href="#i-home"/></svg><span class="lg">Overview</span><span class="sm">Home</span></a>
+          <a href="#/queue" data-page="queue"><svg class="icon"><use href="#i-queue"/></svg><span class="lg">Approval Queue</span><span class="sm">Queue</span><span class="count" id="queueCount" hidden>0</span></a>
+          <a href="#/applications" data-page="applications"><svg class="icon"><use href="#i-list"/></svg><span class="lg">Applications</span><span class="sm">Applied</span></a>
+          <a href="#/resumes" data-page="resumes"><svg class="icon"><use href="#i-doc"/></svg><span class="lg">Resumes &amp; Transcript</span><span class="sm">Resumes</span></a>
+          <a href="#/facts" data-page="facts"><svg class="icon"><use href="#i-star"/></svg><span class="lg">Career Facts</span><span class="sm">Facts</span><span class="count" id="factCount" hidden>0</span></a>
+          <a href="#/github" data-page="github"><svg class="icon"><use href="#i-code"/></svg><span class="lg">GitHub</span><span class="sm">GitHub</span></a>
           <div class="divider"></div>
           <h4>Agent</h4>
-          <a href="#/settings" data-page="settings"><svg class="icon"><use href="#i-gear"/></svg>Settings</a>
-          <a href="#/activity" data-page="activity"><svg class="icon"><use href="#i-pulse"/></svg>Activity Log</a>
+          <a href="#/settings" data-page="settings"><svg class="icon"><use href="#i-gear"/></svg><span class="lg">Settings</span><span class="sm">Settings</span></a>
+          <a href="#/activity" data-page="activity"><svg class="icon"><use href="#i-pulse"/></svg><span class="lg">Activity Log</span><span class="sm">Activity</span></a>
         </nav>
         <main class="content" id="view" tabindex="-1" aria-busy="false"></main>
       </div>
@@ -107,6 +107,6 @@
   </div>
   <div class="toast" id="toast" role="status"></div>
 
-  <script src="app.js?v=8"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>

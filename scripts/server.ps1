@@ -1,6 +1,8 @@
 # Start / stop / restart the Job Agent server as a hidden background process.
-# Usage: server.ps1 start | stop | restart | status
-param([ValidateSet("start", "stop", "restart", "status")][string]$Action = "start")
+# Usage: server.ps1 start | stop | restart | status | open
+#   open = what the desktop icon runs: make sure the server is running the latest code
+#          (restart it if any code changed since it started), then show the dashboard in Chrome.
+param([ValidateSet("start", "stop", "restart", "status", "open")][string]$Action = "start")
 
 $root = Split-Path -Parent $PSScriptRoot
 $pidFile = Join-Path $root "data\server.pid"
@@ -40,7 +42,36 @@ function Start-Server {
     "The server didn't answer yet. Check $log.err"
 }
 
+function Test-CodeChanged($proc) {
+    # Python and config are loaded once at startup; web files are served fresh on each request.
+    $newest = Get-ChildItem -Path (Join-Path $root "app"), (Join-Path $root "requirements.txt"), (Join-Path $root ".env") `
+        -Recurse -File -Include *.py, requirements.txt, .env -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    return $newest -and $newest.LastWriteTime -gt $proc.StartTime
+}
+
+function Test-Busy {
+    # Never restart in the middle of a search or an application run; the new code loads next time.
+    # If the server can't say, assume busy rather than risk killing a run.
+    try {
+        $o = Invoke-RestMethod "http://127.0.0.1:8765/api/overview" -TimeoutSec 5
+        return [bool]($o.batch.running -or $o.run.running)
+    } catch { return $true }
+}
+
+function Open-Dashboard {
+    $p = Get-Server
+    if ($p -and (Test-CodeChanged $p) -and -not (Test-Busy)) { Stop-Server | Out-Null; $p = $null }
+    if (-not $p) { Start-Server | Out-Null }
+    $url = "http://127.0.0.1:8765"
+    $chrome = @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+                "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+                "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($chrome) { Start-Process $chrome $url } else { Start-Process $url }
+}
+
 switch ($Action) {
+    "open"    { Open-Dashboard }
     "start"   { Start-Server }
     "stop"    { Stop-Server }
     "restart" { Stop-Server; Start-Server }
