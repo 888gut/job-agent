@@ -16,6 +16,16 @@ from docx import Document  # noqa: E402
 
 from app import gmail_watch, google_store, layout, llm, matcher, tailor  # noqa: E402
 
+
+def _no_claude(**kw):
+    raise RuntimeError("no real Claude calls in tests")
+
+
+@pytest.fixture(autouse=True)
+def _never_call_claude(monkeypatch):
+    """Any test that reaches the real API client fails fast instead (tests stub what they need)."""
+    monkeypatch.setattr(llm, "_client", SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(create=_no_claude))))
+
 ORIGINAL = """Jordan Lee
 Experience
 Sales Associate, Target, 2022-2024
@@ -203,6 +213,105 @@ def test_plan_tailoring_rules(monkeypatch, full_pdf):
     assert "lines" in reasons[5]
     assert "2,000" in reasons[12]
     assert added is None
+
+
+# ---------------- the Tailor sub-agent (fake Claude: scripted tool calls) ----------------
+def _tool_turn(*calls):
+    """One fake API response whose content is the given (name, input) tool calls."""
+    blocks = [SimpleNamespace(type="thinking", thinking="")]
+    blocks += [SimpleNamespace(type="tool_use", id=f"tu{n}", name=name, input=inp) for n, (name, inp) in enumerate(calls)]
+    return SimpleNamespace(stop_reason="tool_use", content=blocks, model="claude-opus-5-5",
+                           usage=SimpleNamespace(input_tokens=100, output_tokens=50,
+                                                 cache_read_input_tokens=0, cache_creation_input_tokens=0))
+
+
+class _ScriptedMessages:
+    def __init__(self, turns):
+        self.turns, self.calls = list(turns), []
+
+    def create(self, **kw):
+        self.calls.append({**kw, "messages": list(kw["messages"])})   # snapshot: the loop appends
+        return self.turns.pop(0) if self.turns else _tool_turn(("check_edit", {"paragraph": 6, "new_text": "x"}))
+
+
+def _scripted(monkeypatch, turns):
+    msgs = _ScriptedMessages(turns)
+    monkeypatch.setattr(llm, "_client", SimpleNamespace(beta=SimpleNamespace(messages=msgs)))
+    return msgs
+
+
+GOOD_6 = "Trained 6 new hires on checkout procedures and store policy."
+BAD_12 = "Built a YouTube channel with 2,000 subscribers."
+
+
+def test_tailor_subagent_checks_fixes_and_submits_only_passing_edits(monkeypatch, full_pdf):
+    from app.db import ClaudeCall, init_db, session
+    from sqlmodel import select
+
+    init_db()
+    monkeypatch.setattr(tailor, "ask_json", lambda *a, **k: pytest.fail("fell back to the single call"))
+    msgs = _scripted(monkeypatch, [
+        _tool_turn(("check_edit", {"paragraph": 6, "new_text": GOOD_6}),
+                   ("check_edit", {"paragraph": 12, "new_text": BAD_12}),
+                   ("check_edit", {"paragraph": 3, "new_text": "Senior Sales Associate"})),
+        _tool_turn(("submit_plan", {"edits": [{"paragraph": 6, "new_text": GOOD_6, "why": "a"},
+                                              {"paragraph": 12, "new_text": BAD_12, "why": "b"}],
+                                    "add_project_id": 0, "add_project_why": ""})),
+        _tool_turn(("submit_plan", {"edits": [{"paragraph": 6, "new_text": GOOD_6, "why": "a"}],
+                                    "add_project_id": 0, "add_project_why": ""})),
+    ])
+    with session() as s:
+        before = len(s.exec(select(ClaudeCall).where(ClaudeCall.purpose == "Tailor")).all())
+    accepted, rejected, added = tailor.plan_tailoring(JOB, str(full_pdf), "claude-opus-5-5")
+    assert [e["paragraph"] for e in accepted] == [6] and rejected == [] and added is None
+    assert len(msgs.calls) == 3
+
+    first = msgs.calls[0]
+    assert first["model"] == "claude-opus-5-5" and first["output_config"] == {"effort": "high"}
+    assert first["fallbacks"] == "default" and first["cache_control"] == {"type": "ephemeral"}
+    assert {t["name"] for t in first["tools"]} == {"check_edit", "submit_plan"} and all(t["strict"] for t in first["tools"])
+    prefix = first["messages"][0]["content"][0]
+    assert prefix["cache_control"] == {"type": "ephemeral"} and "RESUME BEING TAILORED" in prefix["text"]
+
+    results = {r["tool_use_id"]: r for r in msgs.calls[1]["messages"][-1]["content"]}
+    assert results["tu0"]["content"] == "ok" and not results["tu0"]["is_error"]
+    assert "2,000" in results["tu1"]["content"]
+    assert "locked" in results["tu2"]["content"]
+    refused = msgs.calls[2]["messages"][-1]["content"][0]
+    assert refused["is_error"] and "Not submitted" in refused["content"] and "[12]" in refused["content"]
+    # the assistant turns go back unchanged (thinking blocks included)
+    assert msgs.calls[1]["messages"][1]["content"][0].type == "thinking"
+    with session() as s:
+        after = len(s.exec(select(ClaudeCall).where(ClaudeCall.purpose == "Tailor")).all())
+    assert after - before == 3                                   # one usage row per API request
+
+
+def test_tailor_subagent_cannot_bypass_the_final_checks(monkeypatch, full_pdf):
+    monkeypatch.setattr(tailor, "AGENT_TURNS", 1)                # last turn: the submit is accepted as-is
+    monkeypatch.setattr(tailor, "ask_json", lambda *a, **k: pytest.fail("fell back to the single call"))
+    _scripted(monkeypatch, [_tool_turn(("submit_plan", {
+        "edits": [{"paragraph": 6, "new_text": GOOD_6, "why": "a"}, {"paragraph": 12, "new_text": BAD_12, "why": "b"},
+                  {"paragraph": 8, "new_text": "Technical: SQL, Python", "why": "c"}],
+        "add_project_id": 0, "add_project_why": ""}))])
+    accepted, rejected, _ = tailor.plan_tailoring(JOB, str(full_pdf), "claude-opus-5-5")
+    assert [e["paragraph"] for e in accepted] == [6]
+    reasons = {e["paragraph"]: " ".join(e["problems"]) for e in rejected}
+    assert "2,000" in reasons[12] and "locked" in reasons[8]
+
+
+def test_tailor_subagent_falls_back_to_one_call(monkeypatch, full_pdf):
+    plan = tailor.TailorPlan(edits=[tailor.Edit(paragraph=6, new_text=GOOD_6, why="ok")],
+                             add_project_id=0, add_project_why="")
+    monkeypatch.setattr(tailor, "ask_json", lambda *a, **k: plan)
+    msgs = _scripted(monkeypatch, [])                            # never submits -> hits the turn cap
+    accepted, _, _ = tailor.plan_tailoring(JOB, str(full_pdf), "claude-opus-5-5")
+    assert len(msgs.calls) == tailor.AGENT_TURNS and [e["paragraph"] for e in accepted] == [6]
+    assert "turn left" in msgs.calls[-1]["messages"][-1]["content"][-1]["text"]
+
+    refusal = SimpleNamespace(stop_reason="refusal", content=[], model="m", usage=None)
+    msgs = _scripted(monkeypatch, [refusal])                     # refusal -> straight to the fallback
+    accepted, _, _ = tailor.plan_tailoring(JOB, str(full_pdf), "claude-opus-5-5")
+    assert len(msgs.calls) == 1 and [e["paragraph"] for e in accepted] == [6]
 
 
 def _project(confirmed=True, title="AI Job-Application Agent",

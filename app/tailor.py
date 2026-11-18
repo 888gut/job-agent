@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict
 
 from . import layout as layout_mod
 from .db import ProfileFact, session
-from .llm import ask_json
+from .llm import ToolReply, ask_json, run_tools
 from .resumes import paragraphs
 
 
@@ -146,6 +146,109 @@ def resume_structure(resume_path: str):
     return paras, {i for i, t in enumerate(paras) if t.strip()}, None
 
 
+def edit_problems(paras: list[str], editable: set[int], lay, verified: str, paragraph: int, new: str) -> list[str]:
+    """Every check one edit must pass (no fabrication, editable line, same number of lines).
+    Used by the sub-agent's check_edit tool and by the final checks in plan_tailoring."""
+    problems = guardrail(verified, paras[paragraph], new)
+    if paragraph not in editable:
+        problems.append("that line is locked (only bullets and coursework may change)")
+    if lay is not None:
+        ok, old_n, new_n = layout_mod.fits(lay, lay.blocks[paragraph], new)
+        if not ok:
+            problems.append(f"needs {new_n} lines instead of {old_n}, which would change the layout")
+    return sorted(set(problems))
+
+
+# ---------------- the Tailor sub-agent: draft, check with tools, fix, submit ----------------
+AGENT_TURNS = 8
+
+AGENT_SYSTEM = SYSTEM + f"""
+
+HOW TO WORK (you have tools)
+- check_edit(paragraph, new_text) runs the exact checks your plan must pass: no new names,
+  numbers or terms, an editable line, and the same number of lines on the page. It answers "ok"
+  or lists the problems.
+- Check every edit before you submit it. Check several edits in one turn (parallel calls).
+- When a check fails, rewrite that line to fix exactly the listed problems (shorter wording, or
+  only words that appear in the resume, the other resume or the verified facts) and check it
+  again. If it can't be fixed without losing the meaning, drop it.
+- When every edit you want has passed, call submit_plan once with only those edits.
+- You have at most {AGENT_TURNS} turns in total, so don't spend them on edits you don't need."""
+
+AGENT_TOOLS = [
+    {
+        "name": "check_edit",
+        "description": "Check one proposed edit against the no-fabrication, locked-line and line-fit rules. "
+                       "Returns 'ok' or the list of problems to fix.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "paragraph": {"type": "integer", "description": "Paragraph number from the resume."},
+                "new_text": {"type": "string", "description": "The full replacement text for that paragraph."},
+            },
+            "required": ["paragraph", "new_text"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "submit_plan",
+        "description": "Submit the final tailoring plan and finish. Include only edits that passed check_edit.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "paragraph": {"type": "integer"},
+                            "new_text": {"type": "string"},
+                            "why": {"type": "string", "description": "One short reason for the edit."},
+                        },
+                        "required": ["paragraph", "new_text", "why"],
+                        "additionalProperties": False,
+                    },
+                },
+                "add_project_id": {"type": "integer", "description": "A confirmed project's id, or 0."},
+                "add_project_why": {"type": "string", "description": "One short sentence, or \"\" when 0."},
+            },
+            "required": ["edits", "add_project_id", "add_project_why"],
+            "additionalProperties": False,
+        },
+    },
+]
+
+
+def agent_plan(paras: list[str], editable: set[int], lay, verified: str, *, system: str, user: str,
+               model: str, cached_prefix: str) -> TailorPlan:
+    """Run the Tailor sub-agent. Raises on any failure (the caller falls back to one call)."""
+
+    def check(paragraph: int, new: str) -> list[str]:
+        if paragraph < 0 or paragraph >= len(paras) or not paras[paragraph].strip():
+            return [f"there is no paragraph {paragraph}"]
+        if paras[paragraph].strip() == new.strip():
+            return ["unchanged from the original"]
+        return edit_problems(paras, editable, lay, verified, paragraph, new.strip())
+
+    def handle(name: str, args: dict, turns_left: int) -> ToolReply:
+        if name == "check_edit":
+            problems = check(int(args["paragraph"]), str(args["new_text"]))
+            return ToolReply("ok" if not problems else "problems: " + "; ".join(problems))
+        if name == "submit_plan":
+            plan = TailorPlan.model_validate(args)
+            failing = [(e.paragraph, p) for e in plan.edits if (p := check(e.paragraph, e.new_text))]
+            if failing and turns_left > 0:
+                lines = "\n".join(f"[{i}] " + "; ".join(p) for i, p in failing)
+                return ToolReply("Not submitted. These edits fail the checks; fix or remove them and "
+                                 f"submit again:\n{lines}", is_error=True)
+            return ToolReply("submitted", done=True, value=plan)
+        return ToolReply(f"unknown tool {name}", is_error=True)
+
+    return run_tools(system, user, AGENT_TOOLS, handle, purpose="TailorPlan", model=model, effort="high",
+                     max_turns=AGENT_TURNS, cached_prefix=cached_prefix,
+                     nudge="Please check your edits with check_edit, then finish with submit_plan.")
+
+
 def plan_tailoring(job: dict, resume_path: str, model: str, verified: str = "",
                    facts_prompt: str = "") -> tuple[list[dict], list[dict], dict | None]:
     """Returns (accepted edits, rejected edits, added project or None)."""
@@ -161,8 +264,14 @@ def plan_tailoring(job: dict, resume_path: str, model: str, verified: str = "",
         f"VERIFIED FACTS (true; use only as described)\n{facts_prompt or '(none beyond this resume)'}"
     )
     user = f"JOB\nTitle: {job['title']}\nCompany: {job['company']}\n\n{job['description']}"
-    plan = ask_json(TailorPlan, SYSTEM, user, model=model, effort="high", cached_prefix=stable)
+    try:
+        plan = agent_plan(paras, editable, lay, verified, system=AGENT_SYSTEM, user=user, model=model,
+                          cached_prefix=stable)
+    except Exception as e:  # any sub-agent failure -> the original single structured call
+        print(f"[warn] Tailor sub-agent failed ({type(e).__name__}: {e}); using one call instead")
+        plan = ask_json(TailorPlan, SYSTEM, user, model=model, effort="high", cached_prefix=stable)
 
+    # final checks: run on every plan, however it was made, so nothing unsafe gets through
     accepted, rejected, seen = [], [], set()
     for e in plan.edits:
         if e.paragraph < 0 or e.paragraph >= len(paras) or e.paragraph in seen:
@@ -171,15 +280,9 @@ def plan_tailoring(job: dict, resume_path: str, model: str, verified: str = "",
         if not old.strip() or old.strip() == new:
             continue
         item = {"paragraph": e.paragraph, "old": old, "new": new, "why": e.why}
-        problems = guardrail(verified, old, new)
-        if e.paragraph not in editable:
-            problems.append("that line is locked (only bullets and coursework may change)")
-        if lay is not None:
-            ok, old_n, new_n = layout_mod.fits(lay, lay.blocks[e.paragraph], new)
-            if not ok:
-                problems.append(f"needs {new_n} lines instead of {old_n}, which would change the layout")
+        problems = edit_problems(paras, editable, lay, verified, e.paragraph, new)
         if problems:
-            rejected.append({**item, "problems": sorted(set(problems))})
+            rejected.append({**item, "problems": problems})
         else:
             accepted.append(item)
             seen.add(e.paragraph)
