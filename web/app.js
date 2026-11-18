@@ -119,7 +119,7 @@ async function withBusy(btn, label, fn) {
 
 // ---------- chrome ----------
 function setCrumbs(page) {
-  $("#crumbs").innerHTML = `<svg class="icon" style="width:21px;height:14px" aria-hidden="true"><use href="#i-ol"/></svg>
+  $("#crumbs").innerHTML = `<svg class="icon" style="width:16px;height:16px" aria-hidden="true"><use href="#i-ol"/></svg>
     <span>Offer Ledger</span><span class="sep">&#9656;</span><span>${PAGES[page]}</span>`;
   document.querySelectorAll("#nav a").forEach((a) => {
     const on = a.dataset.page === page;
@@ -1281,58 +1281,9 @@ render.github = async () => {
   });
 };
 
-// ---------- movable window ----------
-// Drag the title bar to move the dashboard window around the browser; drag its bottom-right corner
-// to resize it. Double-click the title bar to put it back. Remembered in this browser only.
-(function movableWindow() {
-  const win = document.querySelector(".window"), bar = win?.querySelector(".titlebar");
-  if (!win || !bar) return;
-  const KEY = "jobAgentWindow";
-  const wide = () => matchMedia("(min-width: 761px)").matches;
-  let pos = { x: 0, y: 0, w: 0, h: 0 };
-  try { pos = { ...pos, ...JSON.parse(localStorage.getItem(KEY) || "{}") }; } catch {}
-  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(pos)); } catch {} };
-  const clamp = () => {  // keep the title bar reachable
-    const r = win.getBoundingClientRect(), baseX = r.left - pos.x, baseY = r.top - pos.y;
-    pos.x = Math.min(Math.max(pos.x, 80 - baseX - r.width), innerWidth - 80 - baseX);
-    pos.y = Math.min(Math.max(pos.y, -baseY), innerHeight - 40 - baseY);
-  };
-  const apply = () => {
-    if (!wide()) { win.style.transform = win.style.width = win.style.height = ""; win.classList.remove("moved"); return; }
-    win.style.transform = pos.x || pos.y ? `translate(${pos.x}px, ${pos.y}px)` : "";
-    win.style.width = pos.w ? pos.w + "px" : "";
-    win.style.height = pos.h ? pos.h + "px" : "";
-    win.classList.toggle("moved", !!(pos.x || pos.y || pos.w || pos.h));
-  };
-  apply();
-  addEventListener("resize", apply);
-  bar.addEventListener("pointerdown", (e) => {
-    if (!wide() || e.button !== 0 || e.target.closest("button, a, input")) return;
-    e.preventDefault();
-    const sx = e.clientX - pos.x, sy = e.clientY - pos.y;
-    bar.setPointerCapture(e.pointerId);
-    win.classList.add("dragging");
-    const move = (ev) => { pos.x = ev.clientX - sx; pos.y = ev.clientY - sy; clamp(); apply(); };
-    const up = () => { bar.removeEventListener("pointermove", move); win.classList.remove("dragging"); save(); };
-    bar.addEventListener("pointermove", move);
-    bar.addEventListener("pointerup", up, { once: true });
-    bar.addEventListener("pointercancel", up, { once: true });
-  });
-  bar.addEventListener("dblclick", (e) => {
-    if (e.target.closest("button")) return;
-    pos = { x: 0, y: 0, w: 0, h: 0 }; save(); apply();
-  });
-  // native corner-resize: remember the size the user drags it to
-  let t;
-  new ResizeObserver(() => {
-    if (!wide() || !win.classList.contains("resizing")) return;
-    clearTimeout(t); t = setTimeout(() => { pos.w = win.offsetWidth; pos.h = win.offsetHeight; save(); win.classList.toggle("moved", true); }, 150);
-  }).observe(win);
-  win.addEventListener("pointerdown", (e) => {  // only count size changes that start at the corner grip
-    const r = win.getBoundingClientRect();
-    if (e.clientX > r.right - 18 && e.clientY > r.bottom - 18) { win.classList.add("resizing"); addEventListener("pointerup", () => setTimeout(() => win.classList.remove("resizing"), 300), { once: true }); }
-  });
-})();
+// The dashboard fills the browser tab (no movable window any more). Forget a position or size
+// saved by the old draggable window so it can't come back.
+try { localStorage.removeItem("jobAgentWindow"); } catch {}
 
 // ---------- router ----------
 let routeSeq = 0, lastPage = null;

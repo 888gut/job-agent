@@ -5,7 +5,7 @@
    ============================================================ */
 :root {
   color-scheme: light;
-  --font: "Segoe UI", "Segoe UI Variable", Tahoma, Verdana, sans-serif;
+  --font: "Segoe UI", "Open Sans", "Segoe UI Variable", Tahoma, Verdana, sans-serif;
   --focus: #2f78bf;
   --field-border: #a9b1ba;
   --frame-line: #8796a8;
@@ -825,14 +825,6 @@ a.btn, a.btn:hover { text-decoration: none; }
 :root[data-theme="dark"] .hs-screen { background: #1a222b; }
 .hs-live [hidden] { display: none !important; }
 
-/* ===== Draggable window (owned by the other engineer) ===== */
-@media (min-width: 761px) {
-  .window { resize: both; overflow: hidden; min-width: 640px; min-height: 420px; max-width: calc(100vw - 8px); max-height: calc(100vh - 8px); }
-  .titlebar { cursor: move; }
-  .titlebar button { cursor: default; }
-  .window.dragging { transition: none; box-shadow: 0 14px 40px rgba(0, 0, 0, 0.35); }
-  .window.dragging, .window.dragging * { user-select: none; }
-}
 .hs-top { position: relative; }
 .cmdbar .hs-top.active { border-color: rgba(255,255,255,0.45); background: rgba(255,255,255,0.18); }
 .hs-top-dot { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: #3f9a2b; }
@@ -918,8 +910,8 @@ a.btn, a.btn:hover { text-decoration: none; }
   --ol-o: #c7d6ff; --ol-l: #3fd49a;
   --cmdbar: linear-gradient(180deg, #1c2c52 0%, #131f3b 100%); --cmdbar-border: #0b1430;
 }
-.titlebar .ol-mark { width: 27px; height: 18px; flex-shrink: 0; }
-.wordmark { font-family: "Outfit", var(--font); font-weight: 800; letter-spacing: -0.02em; font-size: 15px; }
+.titlebar .ol-mark { width: 30px; height: 30px; flex-shrink: 0; }
+.wordmark { font-family: var(--font); font-weight: 700; letter-spacing: -0.01em; font-size: 15px; }
 .wordmark .wm-o { color: var(--ol-o); }
 .wordmark .wm-l { color: var(--ol-l); }
 .titlebar .title .title-sub { font-size: 11.5px; margin-left: 4px; }
@@ -931,3 +923,20 @@ a.btn, a.btn:hover { text-decoration: none; }
 :root[data-theme="dark"] .btn.green { border-color: #126947; background: linear-gradient(180deg, #26a974 0%, #17845a 100%); }
 :root[data-theme="dark"] .btn.green:hover { background: linear-gradient(180deg, #2bb57d 0%, #198f62 100%); }
 :root[data-theme="dark"] .btn.green:active { background: #167a53; }
+
+/* ===== Full page: the dashboard fills the browser tab, like a web app (no window inside a window) ===== */
+body { background: var(--client); }
+.window {
+  margin: 0; width: 100%; height: 100vh; height: 100dvh;
+  border: 0; border-radius: 0; box-shadow: none; padding: 0;
+}
+.titlebar { padding: 0 8px 0 14px; }
+.addressbar { padding-left: 8px; padding-right: 8px; }
+.client { border: 0; border-top: 1px solid var(--client-edge); border-radius: 0; }
+:root[data-theme="dark"] .window { box-shadow: none; }
+
+/* ===== Vista-era type (Segoe UI): Light for big headings, Regular for text, Semibold for labels ===== */
+.content h1 { font-weight: 300; }
+.content h2 { font-weight: 300; font-size: 16px; }
+.gadget .value { font-weight: 300; }
+.panel > .panel-head, .gadget .label, .navpane h4, .listview th, .form > label:not(.check), .form .label, .field-label { font-weight: 600; }

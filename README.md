@@ -1,4 +1,4 @@
-<p><img src="web/offer-ledger-mark.svg" alt="Offer Ledger logo: an O and an L with an arrow cut through where they meet" width="96"></p>
+<p><img src="web/offer-ledger-mark.svg" alt="Offer Ledger logo: a two-tone blob, Vista blue below and mint above a curve that dips and then climbs" width="96"></p>
 
 # Offer Ledger, powered by Job Agent
 
