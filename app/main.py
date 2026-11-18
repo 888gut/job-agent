@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import func, select
 
-from . import demo, facts, gmail_watch, google_store, handshake, layout, live, pipeline
+from . import cover_letter, demo, facts, gmail_watch, google_store, handshake, layout, live, pipeline
 from .config import GOOGLE_CLIENT_FILE, MASTERS, RESUMES, WEB
 from .db import (Application, Job, LogEvent, ProfileFact, Resume, TailoredResume, get_settings, init_db, log,
                  now, save_settings, session)
@@ -142,6 +142,7 @@ def job_out(j: Job) -> dict:
         "status": j.status, "score": j.score, "resume_slot": j.resume_slot, "branch": j.branch,
         "reasons": json.loads(j.reasons_json), "gaps": json.loads(j.gaps_json), "pitch": j.pitch,
         "tailored": tailored_out(tr, j.id),
+        "cover_letter": cover_letter.out(j.id),
         "note": j.note, "is_demo": j.is_demo, "found_at": j.found_at.isoformat(), "description": j.description,
     }
 
@@ -287,9 +288,11 @@ async def employer_apply(job_id: int):
     except google_store.NotConnected:
         raise HTTPException(400, "Connect the storage Google account (Settings) so the tailored resume can be made.")
     reuse = await asyncio.to_thread(pipeline.known_doc, pdf)
-    r = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.employer_apply, job.url, pdf, name, contact, reuse)), timeout=150)
+    cover = await asyncio.to_thread(_cover_for, job, pdf, name, False)
+    r = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.employer_apply, job.url, pdf, name, contact, reuse, cover)), timeout=150)
     if r.get("doc_id"):
         await asyncio.to_thread(pipeline.note_doc_use, r["doc_id"], pdf, name, False)
+    r = await _cover_followup(job, pdf, name, contact, r, cover)
     kind = r.get("kind")
     if kind == "handshake":
         pipeline._set_status(job_id, "queued", "Handshake now offers its own Quick apply for this job, so it's back in the queue.")
@@ -297,6 +300,7 @@ async def employer_apply(job_id: int):
     if kind == "two-step":
         live.select(r["target"])
         return {"ok": True, "kind": kind, "target": "", "filled": [], "resume": r.get("resume", False),
+                "cover": r.get("cover", False), "cover_note": r.get("cover_note", ""),
                 "message": r.get("message", ""), "job": {"id": job.id, "title": job.title, "company": job.company}}
     if kind in ("blocked", "none"):
         return {"ok": False, "kind": kind, "message": r.get("message", "Couldn't open the employer's page.")}
@@ -313,7 +317,44 @@ async def employer_apply(job_id: int):
             kind = "form"  # no Gmail connected: just show the page
     live.select(r["target"])
     return {"ok": True, "kind": kind, "url": r.get("url"), "target": r["target"], "filled": r.get("filled", []),
-            "resume": r.get("resume", False), "job": {"id": job.id, "title": job.title, "company": job.company}}
+            "resume": r.get("resume", False), "cover": r.get("cover", False), "cover_note": r.get("cover_note", ""),
+            "job": {"id": job.id, "title": job.title, "company": job.company}}
+
+
+def _cover_for(job, pdf, name: str, write: bool) -> dict | None:
+    """The job's cover letter for an employer page or two-step box: the existing one, or (write=True,
+    or "always" in Settings) a new one. None when cover letters are off or it can't be made."""
+    st = get_settings()
+    if not st.get("cover_letters", True):
+        return None
+    try:
+        row = cover_letter.get(job.id)
+        if row and row.doc_id:
+            return cover_letter.attachment(cover_letter.export(row.id), name)
+        if write or st.get("cover_letters_always"):
+            return cover_letter.attachment(cover_letter.ensure(job.id, pdf), name)
+    except Exception as e:
+        log(f"Couldn't prepare the cover letter for {job.company}: {e}", "warn", job.id)
+    return None
+
+
+async def _cover_followup(job, pdf, name: str, contact: dict, r: dict, cover: dict | None) -> dict:
+    """The page asked for a cover letter the agent didn't have yet: write it, then attach it."""
+    if r.get("cover_doc_id") and cover:
+        await asyncio.to_thread(pipeline.note_doc_use, r["cover_doc_id"], cover["pdf"], cover["name"], False)
+    if not r.get("cover_wanted") or r.get("cover") or r.get("kind") not in ("two-step", "form", "account"):
+        return r
+    if cover is None:
+        cover = await asyncio.to_thread(_cover_for, job, pdf, name, True)
+    if cover is None:
+        return {**r, "cover_note": "This application asks for a cover letter. Turn on cover letters in Settings, or attach one yourself."}
+    if r["kind"] == "two-step":
+        c = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.cover_into_two_step, r["target"], cover)), timeout=150)
+        if c.get("cover_doc_id"):
+            await asyncio.to_thread(pipeline.note_doc_use, c["cover_doc_id"], cover["pdf"], cover["name"], False)
+        return {**r, **c, "cover_note": c.get("cover_problem", "")}
+    f = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.employer_fill, r["target"], pdf, name, contact, cover)), timeout=90)
+    return {**r, "cover": f.get("cover", False)}
 
 
 @app.post("/api/jobs/{job_id}/employer-fill")
@@ -322,8 +363,11 @@ async def employer_fill(job_id: int, request: Request):
         raise HTTPException(409, f"The agent is busy ({busy}).")
     target = (await request.json()).get("target", "")
     job, pdf, name, contact = await _employer_inputs(job_id)
+    cover = await asyncio.to_thread(_cover_for, job, pdf, name, False)
     try:
-        r = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.employer_fill, target, pdf, name, contact)), timeout=90)
+        r = await asyncio.wait_for(asyncio.wrap_future(handshake.run(handshake.employer_fill, target, pdf, name, contact, cover)), timeout=90)
+        if r.get("cover_wanted") and not r.get("cover") and cover is None:
+            r = await _cover_followup(job, pdf, name, contact, {**r, "kind": "form"}, None)
     except RuntimeError as e:
         raise HTTPException(409, str(e))
     return {"ok": True, **r}
@@ -333,6 +377,93 @@ async def employer_fill(job_id: int, request: Request):
 async def mark_applied(job_id: int):
     await asyncio.get_running_loop().run_in_executor(None, pipeline.mark_applied_manually, job_id)
     return {"ok": True}
+
+
+@app.post("/api/jobs/{job_id}/cover-letter")
+async def write_cover_letter(job_id: int, rewrite: bool = False):
+    """Write this job's cover letter now (or write a new one in place of the old)."""
+    with session() as s:
+        job = s.get(Job, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found.")
+    if job.is_demo:
+        return {"ok": False, "message": "This is sample data."}
+    try:
+        await asyncio.to_thread(cover_letter.rewrite if rewrite else cover_letter.ensure, job_id)
+    except google_store.NotConnected:
+        return {"ok": False, "message": "Connect the storage Google account (Settings) so the letter can be saved as a Google Doc."}
+    except Exception as e:
+        return {"ok": False, "message": f"Couldn't write the cover letter: {e}"}
+    return {"ok": True, "message": "Cover letter ready.", "cover_letter": cover_letter.out(job_id)}
+
+
+@app.get("/api/cover-letters")
+def cover_letters_list():
+    """Everything the Cover Letters tab needs: the letters, the resumes a letter can be written from,
+    and the jobs that could use one (with the resume the agent picked for each)."""
+    options = cover_letter.resume_options()
+    with session() as s:
+        jobs = s.exec(select(Job).where(Job.is_demo == False, Job.status.in_(  # noqa: E712
+            ["queued", "needs_manual", "applying", "applied", "skipped"])).order_by(Job.score.desc())).all()
+    has = {c["job_id"] for c in cover_letter.list_all()}
+    order = {"queued": 0, "needs_manual": 0, "applying": 0, "applied": 1, "skipped": 2}
+    jobs = sorted(jobs, key=lambda j: (order.get(j.status, 3), -(j.score or 0)))
+    st = get_settings()
+    return {
+        "letters": cover_letter.list_all(),
+        "resumes": options,
+        "jobs": [{"id": j.id, "title": j.title, "company": j.company, "status": j.status, "score": j.score,
+                  "resume_key": cover_letter.resume_key(j),
+                  "resume_label": cover_letter.resume_label(cover_letter.resume_key(j), options),
+                  "has_letter": j.id in has} for j in jobs],
+        "settings": {"cover_letters": st.get("cover_letters", True), "cover_letters_always": st.get("cover_letters_always", False)},
+        "storage_connected": google_store.is_connected("storage"),
+    }
+
+
+@app.post("/api/cover-letters")
+async def cover_letters_write(values: dict):
+    """Write a letter from the Cover Letters tab: for a job the agent found (job_id) or a pasted
+    posting (company, title, description), from the chosen resume, steered by an optional prompt."""
+    key = str(values.get("resume_key") or "").strip() or None
+    prompt = str(values.get("prompt") or "")[:2000]
+    job_id = int(values.get("job_id") or 0)
+    try:
+        if job_id:
+            with session() as s:
+                job = s.get(Job, job_id)
+            if not job or job.is_demo:
+                return {"ok": False, "message": "That job isn't available."}
+            row = await asyncio.to_thread(cover_letter.rewrite, job_id, prompt, key)
+        else:
+            if not key:
+                return {"ok": False, "message": "Choose the resume to write from."}
+            row = await asyncio.to_thread(cover_letter.create_standalone, str(values.get("company") or ""),
+                                          str(values.get("title") or ""), str(values.get("description") or ""), key, prompt)
+    except google_store.NotConnected:
+        return {"ok": False, "message": "Connect the storage Google account (Settings) so the letter can be saved as a Google Doc."}
+    except (ValueError, RuntimeError) as e:
+        return {"ok": False, "message": str(e)}
+    except Exception as e:
+        return {"ok": False, "message": f"Couldn't write the cover letter: {e}"}
+    return {"ok": True, "message": "Cover letter ready.", "letter": cover_letter.out_row(row)}
+
+
+@app.delete("/api/cover-letters/{letter_id}")
+def cover_letters_delete(letter_id: int):
+    cover_letter.delete(letter_id)
+    return {"ok": True}
+
+
+@app.get("/api/cover-letters/{letter_id}/pdf")
+def cover_letter_pdf(letter_id: int):
+    from .db import CoverLetter
+
+    with session() as s:
+        row = s.get(CoverLetter, letter_id)
+    if row and row.pdf_path and Path(row.pdf_path).exists():
+        return FileResponse(row.pdf_path, filename="CoverLetter.pdf")
+    raise HTTPException(404, "No PDF exported yet.")
 
 
 @app.get("/api/tailored/{tr_id}/pdf")
@@ -567,7 +698,7 @@ async def upload_resume(slot: str, file: UploadFile = File(...), label: str = Fo
 # ---------------- settings & connections ----------------
 EDITABLE = {"queries", "location", "remote_ok", "max_new_per_run", "min_score", "tailor_below", "model",
             "exclude_titles", "skip_part_time", "max_commute_minutes",
-            "daily_cap", "dry_run", "schedule_enabled", "schedule_hours"}
+            "daily_cap", "dry_run", "schedule_enabled", "schedule_hours", "cover_letters", "cover_letters_always"}
 
 
 @app.get("/api/settings")

@@ -40,8 +40,10 @@ SUCCESS_RX = re.compile(r"application (was )?(submitted|sent)|you applied|succes
 @dataclass
 class ApplyResult:
     status: str          # applied | ready | needs_manual | blocked (CAPTCHA/sign-in: stop the whole run)
+                         # | needs_cover (the form asks for a cover letter and none was given; nothing sent)
     note: str = ""
     doc_id: str = ""     # the Handshake document that was attached
+    cover_doc_id: str = ""  # the cover letter attached, if the form had a place for one
 
 
 def _with_retry(fn, *args):
@@ -525,9 +527,44 @@ def _target_id(page) -> str:
     return page.context.new_cdp_session(page).send("Target.getTargetInfo")["targetInfo"]["targetId"]
 
 
-def _fill_employer_page(emp, resume_pdf: Path, upload_name: str | None, contact: dict) -> dict:
-    """Fill contact basics and attach the resume on an employer page. Never clicks Submit."""
-    out = {"filled": [], "resume": False, "account": False, "email": ""}
+_HINT_JS = ("e => [e.name, e.id, e.accept, e.getAttribute('aria-label'), e.placeholder || '', "
+            "(e.id && document.querySelector('label[for=\"' + CSS.escape(e.id) + '\"]') || {}).innerText || '', "
+            "(e.closest('label,div,fieldset')||{}).innerText||''].join(' ')")
+
+
+def _fill_cover_letter(emp, cover: dict | None) -> dict:
+    """Employer page: find a cover-letter upload box or text box. Attach/paste ours when given.
+    Returns {"wanted": bool, "attached": bool}."""
+    out = {"wanted": False, "attached": False}
+    for frame in emp.frames:
+        try:
+            files = frame.locator("input[type=file]")
+            for i in range(files.count()):
+                hint = (files.nth(i).evaluate(_HINT_JS) or "")
+                if COVER_RX.search(hint) and not re.search(r"resume|\bcv\b", hint, re.I):
+                    out["wanted"] = True
+                    if cover and not out["attached"]:
+                        files.nth(i).set_input_files(str(_upload_copy(Path(cover["pdf"]), cover["name"])))
+                        out["attached"] = True
+            boxes = frame.locator("textarea")
+            for i in range(boxes.count()):
+                box = boxes.nth(i)
+                if not box.is_visible() or box.input_value().strip():
+                    continue
+                if COVER_RX.search(box.evaluate(_HINT_JS) or ""):
+                    out["wanted"] = True
+                    if cover and cover.get("text") and not out["attached"]:
+                        box.fill(cover["text"])
+                        out["attached"] = True
+        except Exception:
+            continue
+    return out
+
+
+def _fill_employer_page(emp, resume_pdf: Path, upload_name: str | None, contact: dict, cover: dict | None = None) -> dict:
+    """Fill contact basics and attach the resume (and the cover letter, when given and the page has
+    a place for one) on an employer page. Never clicks Submit."""
+    out = {"filled": [], "resume": False, "account": False, "email": "", "cover": False, "cover_wanted": False}
     mails = [m for m in emp.eval_on_selector_all("a[href^='mailto:']", "els => els.map(e => e.href)") if "@" in m]
     if mails:
         out["email"] = mails[0][7:].split("?")[0]
@@ -564,10 +601,13 @@ def _fill_employer_page(emp, resume_pdf: Path, upload_name: str | None, contact:
                 break
             except Exception:
                 continue
+        c = _fill_cover_letter(emp, cover)
+        out["cover"], out["cover_wanted"] = c["attached"], c["wanted"]
     return out
 
 
-def employer_apply(url: str, resume_pdf: Path, upload_name: str | None, contact: dict, doc_id: str = "") -> dict:
+def employer_apply(url: str, resume_pdf: Path, upload_name: str | None, contact: dict, doc_id: str = "",
+                   cover: dict | None = None) -> dict:
     """Open a posting's 'Apply externally' page in a new tab of the agent's browser, fill your
     contact basics and attach your resume where that's safe, and leave it for you to finish.
     It never creates accounts, types passwords, answers questions or clicks Submit."""
@@ -605,15 +645,16 @@ def employer_apply(url: str, resume_pdf: Path, upload_name: str | None, contact:
             scope = box.first
             wants_doc = scope.locator("input[type=file]").count() or scope.locator("button.rosetta-inline-alert__close-button").count()
             problem = _attach_resume(scope, resume_pdf, upload_name, doc_id) if wants_doc else None
-            return {"kind": "two-step", "target": _target_id(page), "url": page.url, "filled": [],
-                    "resume": bool(wants_doc) and problem is None, "message": problem or "",
-                    "doc_id": _attached_doc_id(scope) if wants_doc and problem is None else ""}
+            out = {"kind": "two-step", "target": _target_id(page), "url": page.url, "filled": [],
+                   "resume": bool(wants_doc) and problem is None, "message": problem or "",
+                   "doc_id": _attached_doc_id(scope) if wants_doc and problem is None else ""}
+            return {**out, **_cover_in_box(scope, cover)}
         return {"kind": "none", "message": "The employer's application page didn't open."}
     _pause(3, 5)
     result = {"kind": "form", "url": emp.url, "target": _target_id(emp)}
     if (b := _blocker(emp)):
         return {**result, "kind": "page", "message": b, "filled": [], "resume": False}
-    filled = _fill_employer_page(emp, resume_pdf, upload_name, contact)
+    filled = _fill_employer_page(emp, resume_pdf, upload_name, contact, cover)
     result.update(filled)
     if filled["email"]:
         result["kind"] = "email"
@@ -622,18 +663,19 @@ def employer_apply(url: str, resume_pdf: Path, upload_name: str | None, contact:
     return result
 
 
-def employer_fill(target_id: str, resume_pdf: Path, upload_name: str | None, contact: dict) -> dict:
+def employer_fill(target_id: str, resume_pdf: Path, upload_name: str | None, contact: dict,
+                  cover: dict | None = None) -> dict:
     """Fill again on the employer tab you're looking at (after you signed in, or on the next page)."""
     pages = _context().pages
     for p in pages:
         try:
             if target_id and _target_id(p) == target_id and "joinhandshake.com" not in p.url:
-                return {**_fill_employer_page(p, resume_pdf, upload_name, contact), "target": target_id}
+                return {**_fill_employer_page(p, resume_pdf, upload_name, contact, cover), "target": target_id}
         except Exception:
             continue
     for p in reversed(pages):  # newest tab that isn't Handshake
         if "joinhandshake.com" not in p.url and p.url not in ("", "about:blank"):
-            return {**_fill_employer_page(p, resume_pdf, upload_name, contact), "target": _target_id(p)}
+            return {**_fill_employer_page(p, resume_pdf, upload_name, contact, cover), "target": _target_id(p)}
     raise RuntimeError("The employer's page isn't open yet. Click Step 2 on Handshake (or Apply on employer site) first.")
 
 
@@ -831,6 +873,92 @@ def _attach_resume(scope, resume_pdf: Path, upload_name: str | None, doc_id: str
     return "Handshake didn't finish processing the resume upload. Check this job on Handshake."
 
 
+# Handshake's application box has one <fieldset> per document type, headed e.g. "Attach your cover
+# letter": a picker of your cover letters (doc ids in a hidden <select>) and an "Upload new" input
+# named "file-Cover Letter". It only appears when the employer asks for a cover letter.
+COVER_RX = re.compile(r"cover\s*letter", re.I)
+_COVER_HEAD_RX = re.compile(r"attach\s+(?:a\s+|your\s+)?cover\s*letter", re.I)
+
+
+def _cover_box(scope):
+    """The cover-letter section of a Handshake application box, or None."""
+    box = scope.locator("fieldset").filter(has_text=_COVER_HEAD_RX)
+    if not box.count():
+        box = scope.locator("fieldset").filter(has=scope.locator("input[type=file][name*='cover' i]"))
+    return box.first if box.count() else None
+
+
+def _attach_cover_letter(box, cover: dict) -> str | None:
+    """Attach our letter in the cover-letter section: pick it from your Handshake documents when it was
+    uploaded before (cover["doc_id"]), otherwise upload it. Returns a problem, or None."""
+    want = cover.get("doc_id", "")
+    if want and _attached_doc_id(box) == want:
+        return None
+    close = box.locator("button.rosetta-inline-alert__close-button")
+    if close.count():  # Handshake pre-filled a different letter: remove it
+        close.first.click()
+        _pause(1.5, 2.5)
+    if want:
+        try:
+            combo = box.locator("input[role=combobox]")
+            if combo.count():
+                combo.first.click()
+                _pause(1, 2)
+            opt_id = box.evaluate(DOC_OPTION_JS, want)
+            if opt_id:
+                box.locator(f"[id='{opt_id}']").first.click(timeout=8000)
+                deadline = time.time() + 20
+                while time.time() < deadline:
+                    if _attached_doc_id(box) == want:
+                        return None
+                    time.sleep(1)
+        except Exception:
+            pass  # fall back to uploading it
+        close = box.locator("button.rosetta-inline-alert__close-button")
+        if close.count():
+            close.first.click()
+            _pause(1, 2)
+    upload = _upload_copy(Path(cover["pdf"]), cover["name"])
+    inputs = box.locator("input[type=file]")
+    if not inputs.count():
+        return "Couldn't find where to upload the cover letter in the application form."
+    inputs.first.set_input_files(str(upload))
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        text = box.inner_text()
+        busy = re.search(r"converting|uploading|processing", text, re.I)
+        if upload.name in text and not busy and box.locator("button.rosetta-inline-alert__close-button").count():
+            return None
+        time.sleep(1.5)
+    return "Handshake didn't finish processing the cover letter upload. Check this job on Handshake."
+
+
+def _cover_in_box(scope, cover: dict | None) -> dict:
+    """Two-step / application box: {"cover_wanted", "cover", "cover_doc_id", "cover_problem"}."""
+    box = _cover_box(scope)
+    out = {"cover_wanted": box is not None, "cover": False, "cover_doc_id": "", "cover_problem": ""}
+    if box is not None and cover:
+        problem = _attach_cover_letter(box, cover)
+        out.update(cover=problem is None, cover_problem=problem or "",
+                   cover_doc_id=_attached_doc_id(box) if problem is None else "")
+    return out
+
+
+def cover_into_two_step(target_id: str, cover: dict) -> dict:
+    """Attach the cover letter in a posting's open two-step 'External Application' box (Step 1)."""
+    for p in _context().pages:
+        try:
+            if _target_id(p) != target_id:
+                continue
+        except Exception:
+            continue
+        box = p.locator("[role=dialog]").filter(has_text=re.compile(r"External Application", re.I))
+        if box.count():
+            return _cover_in_box(box.first, cover)
+    return {"cover_wanted": False, "cover": False, "cover_doc_id": "",
+            "cover_problem": "The application box isn't open anymore."}
+
+
 def _wait_for_apply_buttons(page, wait: float = 20.0) -> None:
     """Postings render their Apply buttons a few seconds after the page loads (longer right after
     the browser starts). Wait for one of them instead of deciding too early."""
@@ -843,9 +971,12 @@ def _wait_for_apply_buttons(page, wait: float = 20.0) -> None:
         time.sleep(1)
 
 
-def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | None = None, doc_id: str = "") -> ApplyResult:
-    """Open the posting, open its Handshake application form, swap in our resume and (unless
-    dry_run) click Submit Application.
+def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | None = None, doc_id: str = "",
+          cover: dict | None = None) -> ApplyResult:
+    """Open the posting, open its Handshake application form, swap in our resume (and our cover
+    letter, when the form asks for one) and (unless dry_run) click Submit Application.
+    If the form asks for a cover letter and `cover` is None, nothing is sent: it returns
+    "needs_cover" so the letter can be written and the application tried again.
 
     Anything unexpected -> needs_manual, so you can finish that one yourself.
     """
@@ -877,6 +1008,14 @@ def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | N
     if (problem := _attach_resume(scope, resume_pdf, upload_name, doc_id)):
         return ApplyResult("needs_manual", problem)
     doc_id = _attached_doc_id(scope)
+    cover_doc = ""
+    cover_box = _cover_box(scope)
+    if cover_box is not None:
+        if not cover:
+            return ApplyResult("needs_cover", "This application asks for a cover letter.", doc_id)
+        if (problem := _attach_cover_letter(cover_box, cover)):
+            return ApplyResult("needs_manual", problem, doc_id)
+        cover_doc = _attached_doc_id(cover_box)
     _pause(1.5, 2.5)
 
     # Extra required questions/documents we can't answer safely -> hand off to you.
@@ -886,29 +1025,31 @@ def apply(url: str, resume_pdf: Path, dry_run: bool = True, upload_name: str | N
         unanswered = -1  # couldn't check: don't guess
     if unanswered:
         return ApplyResult("needs_manual", "The form has extra required questions. Open the posting and apply yourself (the tailored resume is ready to download).")
-    if scope.locator("input[type=file]").count() > 1:
-        return ApplyResult("needs_manual", "The form asks for more documents (e.g. transcript or cover letter).")
+    files_left = scope.locator("input[type=file]").count() - (
+        cover_box.locator("input[type=file]").count() if cover_box is not None else 0)
+    if files_left > 1:
+        return ApplyResult("needs_manual", "The form asks for more documents (e.g. a transcript).")
 
     submit = scope.get_by_role("button", name=re.compile(r"submit", re.I))
     if submit.count() == 0:
         return ApplyResult("needs_manual", "Couldn't find the Submit button.")
     if dry_run:
-        return ApplyResult("ready", "Dry run passed: everything was filled in and the agent stopped before Submit. To send it for real, turn off dry run in Settings, then click Approve & Submit.", doc_id)
+        return ApplyResult("ready", "Dry run passed: everything was filled in and the agent stopped before Submit. To send it for real, turn off dry run in Settings, then click Approve & Submit.", doc_id, cover_doc)
 
     submit.first.click()
     _pause(4, 6)
     if (b := _blocker(page)):
         return ApplyResult("blocked", f"{b} It may or may not have been submitted. Check this job on Handshake.")
     if SUCCESS_RX.search(page.inner_text("body")[:10000]):
-        return ApplyResult("applied", "Submitted on Handshake.", doc_id)
+        return ApplyResult("applied", "Submitted on Handshake.", doc_id, cover_doc)
     # Check the posting itself: once applied, Handshake swaps the Apply button for an Applied state.
     page.reload(wait_until="domcontentloaded")
     _pause(3, 5)
     body = page.inner_text("body")[:10000]
     if page.get_by_role("button", name=APPLY_BTN_RX).count() == 0 and (
             SUCCESS_RX.search(body) or re.search(r"\bapplied\b|withdraw", body, re.I)):
-        return ApplyResult("applied", "Submitted on Handshake.", doc_id)
-    return ApplyResult("needs_manual", "Clicked Submit but couldn't confirm it went through. Check this job on Handshake.", doc_id)
+        return ApplyResult("applied", "Submitted on Handshake.", doc_id, cover_doc)
+    return ApplyResult("needs_manual", "Clicked Submit but couldn't confirm it went through. Check this job on Handshake.", doc_id, cover_doc)
 
 
 def close() -> None:

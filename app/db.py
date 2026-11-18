@@ -87,6 +87,25 @@ class HandshakeDoc(SQLModel, table=True):
     deleted: bool = False
 
 
+class CoverLetter(SQLModel, table=True):
+    """A cover letter written for one job, kept as a Google Doc (you can edit it there) and
+    exported to PDF each time it's attached, so your edits are included."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    job_id: int = Field(index=True)          # 0: a posting you pasted in (not one the agent found)
+    company: str = ""
+    title: str = ""
+    posting: str = ""                        # the pasted posting text (job_id 0 only)
+    prompt: str = ""                         # your instructions / the employer's question, if any
+    doc_id: Optional[str] = None
+    doc_url: Optional[str] = None
+    pdf_path: Optional[str] = None
+    text: str = ""                           # the letter as written (refreshed from each PDF export)
+    rejected_json: str = "[]"                # sentences the fact check dropped [{text, problems}]
+    resume_key: str = ""                     # the resume it was written from, e.g. "A" or "T12"
+    created_at: datetime = Field(default_factory=now)
+    exported_at: Optional[datetime] = None
+
+
 class Job(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     handshake_id: str = Field(index=True, unique=True)

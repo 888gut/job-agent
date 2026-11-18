@@ -13,7 +13,7 @@ from pathlib import Path
 import pymupdf
 from sqlmodel import func, select
 
-from . import facts, google_store, handshake, layout
+from . import cover_letter, facts, google_store, handshake, layout
 from .config import MASTERS, TAILORED
 from .db import Application, HandshakeDoc, Job, Resume, TailoredResume, get_settings, log, now, save_settings, session
 from .matcher import best_fit, extract_job, score_job, screen
@@ -877,7 +877,11 @@ def approve(job_id: int) -> dict:
     log(f"Applying to {job.title} at {job.company}{' (dry run)' if settings['dry_run'] else ''}", "info", job_id)
     reuse = known_doc(pdf)  # the same PDF is already in your Handshake documents: pick it, don't re-upload
     try:
-        result = _hs(handshake.apply, job.url, pdf, bool(settings["dry_run"]), upload_name_for(job), reuse)
+        # the cover letter (written when the form asks for one) rides along; see cover_letter.py
+        result, cover = cover_letter.apply_with_letter(
+            job, pdf, upload_name_for(job),
+            lambda c: _hs(handshake.apply, job.url, pdf, bool(settings["dry_run"]), upload_name_for(job), reuse, c),
+            settings)
     except FutureTimeout:
         # The browser may still be mid-application (it could even click Submit), so this is never a
         # plain failure: hand it to you to check, and stop any batch run.
@@ -891,6 +895,7 @@ def approve(job_id: int) -> dict:
         return {"ok": False, "message": str(e)}
 
     note_doc_use(result.doc_id, pdf, upload_name_for(job), sent=result.status == "applied")
+    cover_letter.note_use(job, result, cover)
     if result.status == "ready":  # dry run filled everything in: keep it in the queue so it can be submitted later
         _set_status(job_id, "queued", result.note)
         log(f"{job.company}: {result.note}", "info", job_id)

@@ -1209,3 +1209,335 @@ def test_scorer_may_favor_a_proven_resume_only_on_a_near_tie(monkeypatch):
 
     assert run(84, 81, "T5") == "T5"     # within 5 points: the proven copy may win
     assert run(90, 81, "T5") == "A"      # a poor fit isn't lifted by its record
+
+
+# ---------------- cover letters ----------------
+CL_RESUME = """Jordan Lee
+jordan@example.com | (555) 010-2000
+Sales Associate, Target, 2022-2024
+Built dashboards in Excel to track weekly sales for the store team.
+Trained 6 new hires on checkout procedures.
+Independent Card Trader, 2022-2026
+Bought and sold collectibles independently, tracking prices in a spreadsheet.
+Skills: Excel (pivot tables), SQL, Financial modeling (familiarity)"""
+CL_JOB = {"title": "Operations Analyst", "company": "Acme Logistics",
+          "description": "Analyze shipments with Power BI and QuickBooks. Advanced Excel required. Estimating a plus."}
+
+
+def _cl_check(sentence):
+    from app import cover_letter
+    kept, rejected = cover_letter.check_letter([sentence], CL_RESUME, CL_RESUME, CL_JOB)
+    return rejected[0]["problems"] if rejected else []
+
+
+def test_cover_letter_check_allows_true_sentences():
+    for s in ["I built dashboards in Excel to track weekly sales for the store team at Target.",
+              "At Target, I trained 6 new hires on checkout procedures.",
+              "I'm excited about the Operations Analyst role at Acme Logistics.",
+              "Through independent trading of collectibles, I learned to track prices closely.",
+              "I have used SQL and Excel pivot tables.",
+              "I'm eager to learn cost estimating on the job.",
+              "Earlier, at Target, I trained 6 new hires on checkout procedures."]:
+        assert _cl_check(s) == [], s
+
+
+def test_cover_letter_check_blocks_fabrication_and_overstatement():
+    assert any("Walmart" in p for p in _cl_check("I also worked at Walmart on inventory."))
+    assert any("'12'" in p for p in _cl_check("I trained 12 new hires on checkout procedures."))
+    assert any("Tableau" in p for p in _cl_check("Tableau dashboards were my main tool."))     # new tool, even first word
+    assert any("professional" in p for p in _cl_check("As a professional trader, I managed risk daily."))
+    assert any("personal or independent" in p for p in _cl_check("My trading taught me to manage risk."))
+    assert any("professional" in p for p in _cl_check("My independent trading was a self-employed business."))
+    assert any("Power BI" in p for p in _cl_check("I have built reports in Power BI."))
+    assert any("QuickBooks" in p for p in _cl_check("I have experience with QuickBooks."))
+    assert any("estimating" in p for p in _cl_check("My cost estimating work prepared me well."))
+    assert any("overstates Excel" in p for p in _cl_check("I have advanced Excel skills from my time at Target."))
+    assert any("overstates modeling" in p for p in _cl_check("I am experienced in financial modeling."))
+
+
+def test_cover_letter_drops_rejected_sentences_after_one_retry(monkeypatch):
+    from app import cover_letter
+    good = ["I'm applying for the Operations Analyst role at Acme Logistics. " + "At Target, I built dashboards in Excel to track weekly sales for the store team. " * 4,
+            "I also trained 6 new hires on checkout procedures, and I'm eager to learn cost estimating. " * 4]
+    first = cover_letter.LetterDraft(paragraphs=[good[0] + " I have advanced Power BI skills.", good[1] + " I worked at Walmart."])
+    second = cover_letter.LetterDraft(paragraphs=[good[0], good[1] + " As a professional trader, I managed risk."])
+    calls = []
+
+    def fake(model_cls, system, user, **kw):
+        calls.append(user)
+        return first if len(calls) == 1 else second
+
+    monkeypatch.setattr(cover_letter, "ask_json", fake)
+    paras, rejected = cover_letter.write_letter(CL_JOB, CL_RESUME, "", "", "m")
+    assert len(calls) == 2 and "Walmart" in calls[1] and "advanced Power BI" in calls[1]   # the retry is told what failed
+    text = " ".join(paras)
+    assert "Walmart" not in text and "advanced Power BI" not in text and "professional" not in text
+    assert {r["text"] for r in rejected} >= {"I worked at Walmart.", "As a professional trader, I managed risk."}
+    monkeypatch.setattr(cover_letter, "ask_json", lambda *a, **k: cover_letter.LetterDraft(paragraphs=["I worked at Walmart."]))
+    with pytest.raises(RuntimeError):
+        cover_letter.write_letter(CL_JOB, CL_RESUME, "", "", "m")                   # nothing true left: no letter
+
+
+def _text_pdf(path, text):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_textbox(pymupdf.Rect(50, 50, 560, 780), text, fontsize=10)
+    doc.save(str(path))
+    return path
+
+
+def test_cover_letter_is_a_google_doc_reused_per_job_with_your_edits(monkeypatch, tmp_path):
+    from app import cover_letter, pipeline
+    from app.db import CoverLetter, Job, init_db, session
+
+    init_db()
+    with session() as s:
+        job = Job(handshake_id="cl-reuse", url="u", title="Operations Analyst", company="Acme Logistics", status="queued")
+        s.add(job)
+        s.commit()
+        s.refresh(job)
+    resume = _text_pdf(tmp_path / "resume.pdf", CL_RESUME)
+    para = "At Target, I built dashboards in Excel to track weekly sales for the store team. " * 5
+    writes, uploads, exports, doc_text = [], [], [], {"t": ""}
+    monkeypatch.setattr(cover_letter, "write_letter",
+                        lambda *a: writes.append(a) or ([para, para], [{"text": "x", "problems": ["p"]}]))
+    monkeypatch.setattr(cover_letter, "_sources", lambda job: ("", ""))
+    monkeypatch.setattr(pipeline, "contact_for", lambda job: {"name": "Jordan Lee", "email": "j@example.com", "phone": ""})
+    monkeypatch.setattr(google_store, "upload_as_doc", lambda path, name: uploads.append((path, name)) or "cl-doc")
+    monkeypatch.setattr(google_store, "doc_url", lambda i: f"https://docs/{i}")
+
+    def fake_export(doc_id, out):
+        exports.append(doc_id)
+        return _text_pdf(out, doc_text["t"] or "Jordan Lee\nDear Acme Logistics Hiring Team,\n" + para)
+
+    monkeypatch.setattr(google_store, "export_pdf", fake_export)
+    row = cover_letter.ensure(job.id, resume)
+    assert len(writes) == 1 and len(uploads) == 1 and uploads[0][1] == "Cover letter - Acme Logistics, Operations Analyst"
+    assert row.doc_url == "https://docs/cl-doc" and Path(row.pdf_path).exists() and row.resume_key == "A"
+    assert Path(uploads[0][0]).suffix == ".docx"
+    doc_text["t"] = "Jordan Lee\nI edited this line myself."        # you edit the Doc in Google Docs
+    again = cover_letter.ensure(job.id, resume)
+    assert again.id == row.id and len(writes) == 1 and len(uploads) == 1   # reused, not rewritten
+    assert len(exports) == 2 and "edited this line myself" in again.text   # fresh export picks up your edit
+    out = cover_letter.out(job.id)
+    assert out["doc_url"] and out["rejected"] and out["has_pdf"]
+    trashed = []
+    monkeypatch.setattr(google_store, "trash_file", lambda i: trashed.append(i))
+    monkeypatch.setattr(pipeline, "resume_pdf_for", lambda job: resume)        # the resume this job is sent with
+    cover_letter.rewrite(job.id)
+    assert trashed == ["cl-doc"] and len(writes) == 2
+    with session() as s:
+        from sqlmodel import select
+        assert len(s.exec(select(CoverLetter).where(CoverLetter.job_id == job.id)).all()) == 1
+
+
+def test_cover_letter_upload_name():
+    from app import cover_letter
+    assert cover_letter.upload_name("Pat_Doe_Resume.pdf") == "Pat_Doe_CoverLetter.pdf"
+    assert cover_letter.upload_name("Resume.pdf") == "CoverLetter.pdf"
+
+
+def test_cover_letter_written_only_when_the_form_asks(monkeypatch, tmp_path):
+    from app import cover_letter, handshake
+    from app.db import CoverLetter, HandshakeDoc, Job, init_db, session
+
+    init_db()
+    with session() as s:
+        job = Job(handshake_id="cl-attach", url="u", title="Analyst", company="Acme", status="queued")
+        s.add(job)
+        s.commit()
+        s.refresh(job)
+    pdf = _text_pdf(tmp_path / "cover.pdf", "Letter text")
+    made = []
+
+    def fake_ensure(job_id, resume_pdf=None):
+        made.append(job_id)
+        with session() as s:
+            row = CoverLetter(job_id=job_id, doc_id="d", doc_url="u", pdf_path=str(pdf), text="Letter text")
+            s.add(row)
+            s.commit()
+            s.refresh(row)
+            return row
+
+    monkeypatch.setattr(cover_letter, "ensure", fake_ensure)
+    monkeypatch.setattr(cover_letter, "export", lambda letter_id: cover_letter.get(job.id))
+    on = {"cover_letters": True, "cover_letters_always": False}
+
+    # the form doesn't ask: no letter is written
+    seen = []
+    res, cover = cover_letter.apply_with_letter(job, pdf, "R_Resume.pdf",
+                                                lambda c: seen.append(c) or handshake.ApplyResult("ready", "ok"), on)
+    assert res.status == "ready" and seen == [None] and made == [] and cover is None
+
+    # the form asks: written once, then the application is tried again with it
+    seen.clear()
+    outcomes = iter([handshake.ApplyResult("needs_cover", "asks"), handshake.ApplyResult("ready", "ok", "r1", "c1")])
+    res, cover = cover_letter.apply_with_letter(job, pdf, "R_Resume.pdf", lambda c: seen.append(c) or next(outcomes), on)
+    assert res.status == "ready" and made == [job.id] and seen[0] is None
+    assert seen[1]["name"] == "R_CoverLetter.pdf" and seen[1]["text"] == "Letter text" and seen[1]["doc_id"] == ""
+    cover_letter.note_use(job, res, cover)
+    with session() as s:
+        assert s.get(HandshakeDoc, "c1") and not s.get(HandshakeDoc, "c1").sent    # covered by the weekly cleanup
+
+    # next time the same letter is offered up front, and picked from Handshake instead of re-uploaded
+    seen.clear()
+    res, cover = cover_letter.apply_with_letter(job, pdf, "R_Resume.pdf",
+                                                lambda c: seen.append(c) or handshake.ApplyResult("applied", "ok"), on)
+    assert seen[0]["doc_id"] == "c1" and made == [job.id]
+
+    # cover letters turned off: the job goes to you instead of being sent without one
+    res, cover = cover_letter.apply_with_letter(job, pdf, "R_Resume.pdf",
+                                                lambda c: handshake.ApplyResult("needs_cover", "asks"),
+                                                {"cover_letters": False})
+    assert res.status == "needs_manual" and "cover letter" in res.note
+
+
+# A copy of Handshake's application box (structure as seen on a real posting, ids shortened).
+HS_BOX = """<div role="dialog"><form>
+  <fieldset><h4>Attach your resume</h4><div role="status"><h5>R_Resume.pdf</h5><a href="/docs/111">Preview document</a>
+    <button class="rosetta-inline-alert__close-button" aria-label="Close">x</button></div></fieldset>
+  <fieldset><h4>Attach your cover letter</h4><div id="cl">
+    <input role="combobox" type="search" placeholder="Search your cover letters">
+    <div role="listbox" hidden><div role="option" id="x-select-0">Old_CoverLetter.pdf</div><div role="option" id="x-select-1">R_CoverLetter.pdf</div></div>
+    <select hidden><option value="500">500</option><option value="777">777</option></select>
+    <label for="up">Upload new</label><input id="up" name="file-Cover Letter" type="file"></div></fieldset>
+  <button type="button">Submit Application</button></form></div>
+<script>
+  const done = (name, id) => { document.getElementById('cl').innerHTML = '<div role="status"><h5>' + name +
+    '</h5><a href="/docs/' + id + '">Preview document</a><button class="rosetta-inline-alert__close-button">x</button></div>'; };
+  document.getElementById('up').addEventListener('change', e => done(e.target.files[0].name, '900'));
+  document.querySelector('[role=combobox]').addEventListener('click', () => document.querySelector('[role=listbox]').hidden = false);
+  document.getElementById('x-select-1').addEventListener('click', () => done('R_CoverLetter.pdf', '777'));
+</script>"""
+
+
+def test_handshake_box_cover_letter_is_found_and_attached(tmp_path):
+    from app import handshake
+    sync_api = pytest.importorskip("playwright.sync_api")
+    pdf = tmp_path / "cover_9.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    with sync_api.sync_playwright() as pw:
+        try:
+            browser = pw.chromium.launch(channel="chrome", headless=True)
+        except Exception:
+            pytest.skip("Chrome not available")
+        page = browser.new_page()
+        page.set_content(HS_BOX)
+        dlg = page.locator("[role=dialog]")
+        box = handshake._cover_box(dlg)
+        assert box is not None and handshake._attached_doc_id(dlg) == "111"   # the resume link comes first
+        assert handshake._attach_cover_letter(box, {"pdf": pdf, "name": "R_CoverLetter.pdf", "doc_id": ""}) is None
+        assert handshake._attached_doc_id(box) == "900" and "R_CoverLetter.pdf" in box.inner_text()   # uploaded
+        page = browser.new_page()                                               # fresh page: the script declares consts
+        page.set_content(HS_BOX)
+        box = handshake._cover_box(page.locator("[role=dialog]"))
+        assert handshake._attach_cover_letter(box, {"pdf": pdf, "name": "R_CoverLetter.pdf", "doc_id": "777"}) is None
+        assert handshake._attached_doc_id(box) == "777"                        # picked, not uploaded again
+        page.set_content(HS_BOX.replace("Attach your cover letter", "Attach your transcript").replace("file-Cover Letter", "file-Transcript"))
+        assert handshake._cover_box(page.locator("[role=dialog]")) is None    # no cover letter asked for
+        browser.close()
+
+
+def test_employer_page_cover_letter_upload_or_text_box(tmp_path):
+    from app import handshake
+    sync_api = pytest.importorskip("playwright.sync_api")
+    contact = {"name": "Pat Doe", "first": "Pat", "last": "Doe", "email": "pat@example.com", "phone": ""}
+    form = """<form><label>Resume/CV <input type="file" name="resume"></label>
+      <label>Cover letter <input type="file" name="cover"></label></form>"""
+    text_form = """<form><label>Resume <input type="file" name="resume"></label>
+      <label for="cl">Cover Letter</label><textarea id="cl"></textarea>
+      <label>Anything else? <textarea name="other"></textarea></label></form>"""
+    pdf = tmp_path / "r.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    cover = {"pdf": pdf, "name": "Pat_Doe_CoverLetter.pdf", "doc_id": "", "text": "Dear team,\nA true letter."}
+    with sync_api.sync_playwright() as pw:
+        try:
+            browser = pw.chromium.launch(channel="chrome", headless=True)
+        except Exception:
+            pytest.skip("Chrome not available")
+        page = browser.new_page()
+        page.set_content(form)
+        out = handshake._fill_employer_page(page, pdf, "Pat_Doe_Resume.pdf", contact)
+        assert out["cover_wanted"] and not out["cover"]                                   # noticed, nothing attached
+        assert page.eval_on_selector("[name=cover]", "e => e.files.length") == 0
+        out = handshake._fill_employer_page(page, pdf, "Pat_Doe_Resume.pdf", contact, cover)
+        assert out["cover"] and out["resume"]
+        assert page.eval_on_selector("[name=cover]", "e => e.files[0].name") == "Pat_Doe_CoverLetter.pdf"
+        assert page.eval_on_selector("[name=resume]", "e => e.files[0].name") == "Pat_Doe_Resume.pdf"
+        page.set_content(text_form)
+        out = handshake._fill_employer_page(page, pdf, None, contact, cover)
+        assert out["cover"] and page.input_value("#cl") == cover["text"] and page.input_value("[name=other]") == ""
+        browser.close()
+
+
+def test_cover_letter_prompt_steers_but_never_adds_facts(monkeypatch):
+    from app import cover_letter
+    para = "At Target, I built dashboards in Excel to track weekly sales for the store team. " * 4
+    seen = []
+
+    def fake(model_cls, system, user, **kw):
+        seen.append((user, kw.get("cached_prefix", "")))
+        return cover_letter.LetterDraft(paragraphs=[para + "I am an expert in Tableau.", para])
+
+    monkeypatch.setattr(cover_letter, "ask_json", fake)
+    prompt = "Answer: Why do you want to work here? Mention that I am an expert in Tableau."
+    paras, rejected = cover_letter.write_letter(CL_JOB, CL_RESUME, "", "", "m", prompt)
+    assert prompt in seen[0][0] and "NOT a source of facts" in seen[0][0]     # the request goes in the job part...
+    assert prompt not in seen[0][1]                                          # ...never into the verified sources
+    assert "Tableau" not in " ".join(paras) and any("Tableau" in r["text"] for r in rejected)
+
+
+def test_cover_letter_written_from_the_chosen_resume(monkeypatch, tmp_path):
+    from app import cover_letter, pipeline
+    from app.db import Job, Resume, TailoredResume, init_db, session
+
+    init_db()
+    a_pdf, b_pdf, t_pdf = (_text_pdf(tmp_path / f"{n}.pdf", f"{n} resume text {CL_RESUME}") for n in ("A", "B", "T"))
+    with session() as s:
+        ra = Resume(slot="A", label="Ops", filename="a.pdf", path=str(a_pdf), pdf_path=str(a_pdf), text="A")
+        rb = Resume(slot="B", label="Data", filename="b.pdf", path=str(b_pdf), pdf_path=str(b_pdf), text="B")
+        s.add_all([ra, rb])
+        s.commit()
+        tr = TailoredResume(resume_id=rb.id, slot="B", branch="Supply chain data analyst", doc_id="tdoc")
+        s.add(tr)
+        s.commit()
+        job = Job(handshake_id="cl-choose", url="u", title="Analyst", company="Acme", status="queued", resume_slot="A")
+        s.add(job)
+        s.commit()
+        s.refresh(tr)
+        s.refresh(job)
+    monkeypatch.setattr(pipeline, "current_resumes", lambda: {"A": ra, "B": rb})
+    monkeypatch.setattr(pipeline, "branch_heads", lambda: [tr])
+    monkeypatch.setattr(pipeline, "build_doc", lambda i: SimpleNamespace(pdf_path=str(t_pdf), slot="B"))
+    monkeypatch.setattr(pipeline, "resume_pdf_for", lambda j: a_pdf)
+    monkeypatch.setattr(pipeline, "contact_for", lambda j: {"name": "Jordan Lee"})
+    monkeypatch.setattr(google_store, "upload_as_doc", lambda path, name: "d")
+    monkeypatch.setattr(google_store, "doc_url", lambda i: f"u/{i}")
+    monkeypatch.setattr(google_store, "export_pdf", lambda doc_id, out: _text_pdf(out, "Letter"))
+    monkeypatch.setattr(google_store, "trash_file", lambda i: None)
+    para = "At Target, I built dashboards in Excel to track weekly sales for the store team. " * 4
+    used = []
+    monkeypatch.setattr(cover_letter, "write_letter",
+                        lambda jd, resume_text, verified, facts_text, model, prompt="": used.append((resume_text[:1], prompt)) or ([para, para], []))
+    monkeypatch.setattr(cover_letter, "_sources", lambda slot: used.append(("slot", slot)) or ("", ""))
+
+    opts = cover_letter.resume_options()
+    assert [o["key"] for o in opts] == ["A", "B", f"T{tr.id}"]
+    assert opts[2]["label"] == "Resume B · Supply chain data analyst (tailored)"
+
+    row = cover_letter.create(job.id)                                       # default: the agent's pick for the job
+    assert row.resume_key == "A" and used[-1] == ("A", "") and ("slot", "A") in used
+    row = cover_letter.rewrite(job.id, "Lead with sales.", f"T{tr.id}")   # a tailored branch resume instead
+    assert row.resume_key == f"T{tr.id}" and used[-1] == ("T", "Lead with sales.") and ("slot", "B") in used
+    assert row.prompt == "Lead with sales." and cover_letter.get(job.id).id == row.id
+
+    with pytest.raises(ValueError):
+        cover_letter.create_standalone("Acme", "Analyst", "too short", "B")
+    solo = cover_letter.create_standalone("Globex", "Planner", "Plan inventory and shipments. " * 5, "B")
+    assert solo.job_id == 0 and solo.company == "Globex" and used[-1][0] == "B"
+    listed = cover_letter.list_all()
+    assert {(c["company"], c["resume_label"]) for c in listed} >= {
+        ("Globex", "Resume B (original) · Data"), ("Acme", "Resume B · Supply chain data analyst (tailored)")}
+    assert cover_letter.get(0) is None                                      # pasted postings never attach to a job
+    cover_letter.delete(solo.id)
+    assert all(c["id"] != solo.id for c in cover_letter.list_all())

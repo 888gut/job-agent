@@ -2,7 +2,7 @@
 const $ = (s, el = document) => el.querySelector(s);
 const view = $("#view");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const PAGES = { overview: "Overview", queue: "Approval Queue", applications: "Applications", resumes: "Resumes & Transcript", facts: "Career Facts", github: "GitHub", handshake: "Handshake", settings: "Settings", activity: "Activity Log", search: "Search results" };
+const PAGES = { overview: "Overview", queue: "Approval Queue", covers: "Cover Letters", applications: "Applications", resumes: "Resumes & Transcript", facts: "Career Facts", github: "GitHub", handshake: "Handshake", settings: "Settings", activity: "Activity Log", search: "Search results" };
 let currentPage = "overview";
 let pollTimer = null;
 
@@ -252,7 +252,8 @@ render.queue = async () => {
             <td><div class="cell-title" title="${esc(j.title)}">${esc(j.title)}</div>
               <div class="cell-sub" title="${esc([j.company, j.location].filter(Boolean).join(" · "))}">${where(j)}${j.is_demo ? ' <span class="pill demo">Sample</span>' : ""}</div></td>
             <td class="col-resume"><div class="pill-row"><span class="pill slot">Resume ${esc(j.resume_slot || "?")}</span>
-              ${j.tailored ? `<span class="pill tailored" title="${esc(j.tailored.branch)}">${j.tailored.reused ? "Tailored · reused" : "Tailored"}</span>` : ""}</div>
+              ${j.tailored ? `<span class="pill tailored" title="${esc(j.tailored.branch)}">${j.tailored.reused ? "Tailored · reused" : "Tailored"}</span>` : ""}
+              ${j.cover_letter?.doc_url ? `<a class="pill fitok" href="${esc(j.cover_letter.doc_url)}" target="_blank" rel="noopener" title="Open the cover letter's Google Doc">Cover letter ready</a>` : ""}</div>
               ${j.branch ? `<div class="cell-sub" style="margin-top:3px" title="${esc(j.branch)}">${esc(j.branch)}</div>` : ""}</td>
             <td class="col-match">${meter(j.score)}</td></tr>`).join("")}</tbody></table>
           <div class="panel-foot" id="batchArea"></div></div>`
@@ -408,7 +409,7 @@ function jobCard(j) {
       ${logo(j.company)}
       <div style="min-width:0"><div class="card-title" title="${esc(j.title)}">${esc(j.title)}</div>
         <div class="card-sub"><span>${esc(j.company)}</span><span>${esc(j.location)}</span>
-          <span class="pill slot">Resume ${esc(j.resume_slot || "?")}</span>${t ? `<span class="pill tailored">${t.reused ? "Tailored · reused" : "Tailored"}</span>` : ""}
+          <span class="pill slot">Resume ${esc(j.resume_slot || "?")}</span>${t ? `<span class="pill tailored">${t.reused ? "Tailored · reused" : "Tailored"}</span>` : ""}${j.cover_letter?.doc_url ? `<span class="pill fitok">Cover letter ready</span>` : ""}
           ${j.status === "needs_manual" ? `<span class="pill warn">Needs you</span>` : ""}${j.is_demo ? `<span class="pill demo">Sample</span>` : ""}
           <span class="muted">found ${ago(j.found_at)}</span></div></div>
       <div class="score">${meter(j.score)}</div>
@@ -434,7 +435,26 @@ function jobCard(j) {
         ${docLink}
         <button class="btn small" data-act="open">View posting</button>
       </div>
+      ${coverInfo(j)}
     </div></div>`;
+}
+
+function coverInfo(j) {
+  const c = j.cover_letter;
+  if (j.is_demo) return "";
+  if (!c || !c.doc_url) {
+    return `<div class="mt"><b>Cover letter</b></div>
+      <p class="muted" style="margin:4px 0">None yet. The agent writes one when the application asks for it (see Settings), from the resume above and your confirmed Career Facts only.</p>
+      <div class="btn-row"><button class="btn small" data-act="cover">Write cover letter now</button>
+        <button class="btn small" data-act="cover-tab">Write with a prompt…</button></div>`;
+  }
+  return `<div class="mt"><b>Cover letter</b> <span class="pill fitok">Cover letter ready</span></div>
+    <p class="muted small" style="margin:4px 0">${c.words} words, written ${ago(c.created_at)} from the resume above and your confirmed Career Facts. Edits you make in the Google Doc are included when the agent attaches it.</p>
+    ${c.rejected.length ? `<details class="mt"><summary class="muted">${c.rejected.length} sentence(s) dropped by the fact check</summary>
+      <ul class="bullets">${c.rejected.map((r) => `<li>${esc(r.text)} <span class="muted">(${esc(r.problems.join(", "))})</span></li>`).join("")}</ul></details>` : ""}
+    <div class="btn-row mt"><a class="btn small" href="${esc(c.doc_url)}" target="_blank" rel="noopener"><svg class="icon" style="width:14px;height:14px" aria-hidden="true"><use href="#i-doc"/></svg>Open cover letter</a>
+      ${c.has_pdf ? `<a class="btn small" href="/api/cover-letters/${c.id}/pdf" target="_blank" rel="noopener">PDF</a>` : ""}
+      <button class="btn small" data-act="cover-tab">Write a new one…</button></div>`;
 }
 
 async function jobAction(b) {
@@ -459,13 +479,107 @@ async function jobAction(b) {
       busy(b, true, "Opening…");
       const r = await post(`/api/jobs/${id}/employer-apply`);
       if (r.kind === "email" && r.draft_url) { notice("Gmail draft ready", r.message); window.open(r.draft_url, "_blank", "noopener"); }
-      else if (r.job) { live.task = { ...r.job, kind: r.kind, filled: r.filled, resume: r.resume, target: r.target }; location.hash = "#/handshake"; return; }
+      else if (r.job) { live.task = { ...r.job, kind: r.kind, filled: r.filled, resume: r.resume, cover: r.cover, cover_note: r.cover_note, target: r.target }; location.hash = "#/handshake"; return; }
       else toast(r.message, r.ok);
     }
     else if (act === "copy") { await navigator.clipboard.writeText(card.querySelector(".pitch").textContent); toast("Copied."); return; }
+    else if (act === "cover") {
+      busy(b, true, "Writing… (about a minute)");
+      const r = await post(`/api/jobs/${id}/cover-letter`); toast(r.message, r.ok);
+    }
+    else if (act === "cover-tab") { sessionStorage.setItem("coverJob", id); location.hash = "#/covers"; return; }
   } catch (e) { toast(e.message, false); }
   try { await render.queue(); } catch (e) { toast(e.message, false); }
 }
+
+// ---------------- Cover Letters ----------------
+render.covers = async () => {
+  const d = await api("/api/cover-letters");
+  const want = sessionStorage.getItem("coverJob"); sessionStorage.removeItem("coverJob");
+  const groups = [["Waiting in your queue", (j) => ["queued", "needs_manual", "applying"].includes(j.status)],
+                  ["Already applied", (j) => j.status === "applied"], ["Skipped by the agent", (j) => j.status === "skipped"]];
+  const jobOpts = groups.map(([label, test]) => {
+    const js = d.jobs.filter(test);
+    return js.length ? `<optgroup label="${esc(label)}">${js.map((j) => `<option value="${j.id}" ${String(j.id) === want ? "selected" : ""}>${esc(`${j.title} · ${j.company}`)}${j.has_letter ? " (has a letter)" : ""}</option>`).join("")}</optgroup>` : "";
+  }).join("");
+  const resumeOpts = (pick) => [["Original resumes", "original"], ["Tailored branch resumes", "tailored"]].map(([label, kind]) => {
+    const rs = d.resumes.filter((r) => r.kind === kind);
+    return rs.length ? `<optgroup label="${label}">${rs.map((r) => `<option value="${esc(r.key)}" ${r.key === pick ? "selected" : ""}>${esc(r.label)}${r.key === pick ? " (agent's pick)" : ""}</option>`).join("")}</optgroup>` : "";
+  }).join("");
+  const auto = d.settings.cover_letters ? (d.settings.cover_letters_always ? "on, for every application" : "on, when an application asks for one") : "off";
+  const letterCard = (c) => `<div class="fact cl-item" data-id="${c.id}">
+      <div class="fact-main">
+        <div class="fact-title">${esc(c.title)} <span class="muted" style="font-weight:normal">at ${esc(c.company)}</span></div>
+        <div class="pill-row" style="margin-top:4px"><span class="pill ${c.resume_key.startsWith("T") ? "tailored" : "slot"}" title="Written from">${esc(c.resume_label || "Resume")}</span>
+          ${c.job_id ? `<span class="pill">${esc({ queued: "In queue", needs_manual: "Needs you", applied: "Applied", skipped: "Skipped" }[c.job_status] || c.job_status)}</span>` : `<span class="pill">Pasted posting</span>`}
+          <span class="muted small">${c.words} words · ${ago(c.created_at)}${c.rejected.length ? ` · ${c.rejected.length} sentence(s) dropped by the fact check` : ""}</span></div>
+        ${c.prompt ? `<div class="muted small" style="margin-top:4px">Your prompt: “${esc(c.prompt)}”</div>` : ""}
+        <details class="mt"><summary class="muted">Read the letter</summary><div class="cl-text">${esc(c.text)}</div>
+          ${c.rejected.length ? `<div class="muted small mt"><b>Left out by the fact check:</b><ul class="bullets">${c.rejected.map((r) => `<li>${esc(r.text)} (${esc(r.problems.join(", "))})</li>`).join("")}</ul></div>` : ""}</details>
+      </div>
+      <div class="btn-row">
+        ${c.doc_url ? `<a class="btn small" href="${esc(c.doc_url)}" target="_blank" rel="noopener">Open Google Doc</a>` : ""}
+        ${c.has_pdf ? `<a class="btn small" href="/api/cover-letters/${c.id}/pdf" target="_blank" rel="noopener">PDF</a>` : ""}
+        <button class="btn small" data-cl="delete">Delete</button></div></div>`;
+  view.innerHTML = `<h1>Cover Letters</h1>
+    <p class="subtitle">A short letter for one job, written only from the resume you choose and your confirmed Career Facts. When an application asks for a cover letter, the agent attaches the job's letter for you.</p>
+    <div class="panel"><div class="panel-head"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg>How it works</div><div class="panel-body">
+      <ol class="cl-steps">
+        <li><b>Pick the job.</b> One from your queue, or paste a posting the agent didn't find.</li>
+        <li><b>Pick the resume it's written from.</b> The agent's pick for that job is chosen for you. A tailored branch resume makes the letter match the resume you send.</li>
+        <li><b>Prompt it (optional).</b> Say what to focus on, or paste the application's question, like "Why do you want to work here?"</li>
+        <li><b>Review.</b> Every sentence is fact-checked against your resumes and Career Facts. Anything new is left out. You can edit the Google Doc.</li>
+        <li><b>Apply as usual.</b> Approve &amp; Submit attaches the letter on Handshake, and Apply on employer site fills it in there.</li>
+      </ol>
+      <p class="muted small" style="margin:6px 0 0">Automatic letters are ${auto}. <a href="#/settings">Change in Settings</a>.</p></div></div>
+    ${d.storage_connected ? "" : `<div class="note mt">Connect the storage Google account in <a href="#/settings">Settings</a> first: each letter is saved as a Google Doc.</div>`}
+    <div class="panel mt"><div class="panel-head"><svg class="icon" aria-hidden="true"><use href="#i-doc"/></svg>Write a cover letter</div><div class="panel-body"><div class="form">
+      <label for="clJob">For</label>
+      <select id="clJob">${jobOpts}<option value="paste" ${d.jobs.length ? "" : "selected"}>Paste a posting…</option></select>
+      <label for="clCompany" class="cl-paste">Company</label><input type="text" id="clCompany" class="cl-paste" maxlength="120">
+      <label for="clTitle" class="cl-paste">Job title</label><input type="text" id="clTitle" class="cl-paste" maxlength="160">
+      <label for="clPosting" class="cl-paste">Posting</label><textarea id="clPosting" class="cl-paste" style="min-height:140px" placeholder="Paste the job description: responsibilities and qualifications."></textarea>
+      <label for="clResume">Written from</label><select id="clResume"></select>
+      <div class="help" id="clResumeHelp">The letter may only say what this resume, your other resume, your transcript and your confirmed Career Facts say.</div>
+      <label for="clPrompt">Your prompt <span class="muted small">(optional)</span></label>
+      <textarea id="clPrompt" maxlength="2000" aria-describedby="clPromptHelp" placeholder="e.g. Lead with my customer service work. Or paste the question: Why are you interested in this role?"></textarea>
+      <div class="help" id="clPromptHelp">Steers focus and tone. It can't add facts: to use something new, confirm it on <a href="#/facts">Career Facts</a> first.</div>
+      <span class="label"></span><div class="muted small" id="clReplace" aria-live="polite"></div>
+    </div>
+    <div class="btn-row mt"><button class="btn primary" id="clWrite">Write cover letter</button><span class="muted small">Takes about a minute.</span></div></div></div>
+    <h2>Your cover letters${d.letters.length ? ` <span class="muted small">(${d.letters.length})</span>` : ""}</h2>
+    <div class="panel"><div class="panel-body" style="padding-top:2px;padding-bottom:2px">${d.letters.length ? d.letters.map(letterCard).join("")
+      : `<div class="empty" style="padding:24px 10px"><div class="big">No cover letters yet</div>Write one above, or let the agent write one when an application asks for it.</div>`}</div></div>`;
+
+  const sync = () => {
+    const v = $("#clJob").value, paste = v === "paste", job = d.jobs.find((j) => String(j.id) === v);
+    view.querySelectorAll(".cl-paste").forEach((el) => (el.hidden = !paste));
+    const prev = $("#clResume").value;
+    // the job's own resume may be an older version of a branch copy: still offer it, since that's what gets sent
+    const own = job && !d.resumes.some((r) => r.key === job.resume_key)
+      ? `<optgroup label="Sent with this job"><option value="${esc(job.resume_key)}" selected>${esc(job.resume_label)} (agent's pick)</option></optgroup>` : "";
+    $("#clResume").innerHTML = own + resumeOpts(job ? job.resume_key : "");
+    if (paste && prev) $("#clResume").value = prev;
+    $("#clReplace").textContent = job?.has_letter ? "This job already has a letter. Writing a new one replaces it, and the old Google Doc goes to Drive's trash." : "";
+  };
+  $("#clJob").onchange = sync; sync();
+  $("#clWrite").onclick = (e) => withBusy(e.currentTarget, "Writing…", async () => {
+    const v = $("#clJob").value, job = d.jobs.find((j) => String(j.id) === v);
+    if (job?.has_letter && !(await dialog({ title: "Replace this job's cover letter?", icon: "i-doc", ok: "Write new",
+      body: `<p style="margin:0">The current letter's Google Doc, including any edits you made there, moves to Drive's trash.</p>` }))) return;
+    const body = { resume_key: $("#clResume").value, prompt: $("#clPrompt").value.trim() };
+    if (job) body.job_id = job.id;
+    else Object.assign(body, { company: $("#clCompany").value.trim(), title: $("#clTitle").value.trim(), description: $("#clPosting").value.trim() });
+    const r = await api("/api/cover-letters", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    toast(r.message, r.ok);
+    if (r.ok) await render.covers();
+  });
+  view.querySelectorAll(".cl-item [data-cl=delete]").forEach((b) => b.onclick = async () => {
+    if (!(await dialog({ title: "Delete this cover letter?", body: "Its Google Doc moves to Drive's trash (restorable for 30 days).", ok: "Delete" }))) return;
+    await withBusy(b, "Deleting…", async () => { await api(`/api/cover-letters/${b.closest(".cl-item").dataset.id}`, { method: "DELETE" }); toast("Deleted."); });
+    render.covers();
+  });
+};
 
 let appSort = { key: "applied_at", dir: -1 };
 const STATUSES = ["Submitted", "Confirmed", "Interview", "Offer", "Rejected"];
@@ -756,6 +870,9 @@ render.settings = async () => {
     <div class="panel mt"><div class="panel-head">Applying &amp; schedule</div><div class="panel-body"><div class="form">
       <span class="label">Dry run</span><label class="check"><input type="checkbox" id="dry_run" ${s.dry_run ? "checked" : ""} aria-describedby="dryHelp"> Attach the resume but stop before the final Submit</label>
       <div class="help" id="dryHelp">Keep this on for your first few applications to watch the agent work.</div>
+      <span class="label">Cover letters</span><label class="check"><input type="checkbox" id="cover_letters" ${s.cover_letters ? "checked" : ""} aria-describedby="coverHelp"> Write cover letters when an application asks for one</label>
+      <span class="label"></span><label class="check"><input type="checkbox" id="cover_letters_always" ${s.cover_letters_always ? "checked" : ""}> Always: write one for every application I approve</label>
+      <div class="help" id="coverHelp">A short letter for that job, from the resume being sent and your confirmed Career Facts only. Every sentence is fact-checked; anything that adds a new employer, number, tool or skill is dropped. Each letter is a Google Doc you can edit.</div>
       <label for="daily_cap">Daily limit</label><input type="number" id="daily_cap" min="1" max="100" value="${s.daily_cap}" style="width:90px">
       <span class="label">Automatic search</span><label class="check"><input type="checkbox" id="schedule_enabled" ${s.schedule_enabled ? "checked" : ""}> Search on a schedule while this PC is on</label>
       <label for="schedule_hours">Every (hours)</label><input type="number" id="schedule_hours" min="1" max="48" value="${s.schedule_hours}" style="width:90px">
@@ -772,6 +889,7 @@ render.settings = async () => {
       exclude_titles: v("exclude_titles").value.split("\n").map((x) => x.trim()).filter(Boolean),
       skip_part_time: v("skip_part_time").checked, max_commute_minutes: +v("max_commute_minutes").value,
       max_new_per_run: +v("max_new_per_run").value, model: v("model").value.trim(), dry_run: v("dry_run").checked,
+      cover_letters: v("cover_letters").checked, cover_letters_always: v("cover_letters_always").checked,
       daily_cap: +v("daily_cap").value, schedule_enabled: v("schedule_enabled").checked, schedule_hours: +v("schedule_hours").value,
     };
     await api("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -875,10 +993,10 @@ async function liveRun(id) {
 function employerBanner() {
   const t = live.task, box = $("#hsNext");
   if (!t || !box) return;
-  const parts = [...(t.filled || []), ...(t.resume ? ["resume attached"] : [])];
+  const parts = [...(t.filled || []), ...(t.resume ? ["resume attached"] : []), ...(t.cover ? ["cover letter attached"] : [])];
   const did = t.kind === "two-step" ? "" : parts.length ? `Filled in: <b>${esc(parts.join(", "))}</b>.` : "Nothing could be filled in automatically on this page.";
   const step = t.kind === "two-step"
-    ? `Handshake asks for this in two steps. ${t.resume ? "Step 1 has your resume for this job attached. " : ""}Check it in the view below, then click <b>Step 2: External Application</b> yourself (that sends Step 1 to the employer and opens their page). Then click <b>Fill in</b> here.`
+    ? `Handshake asks for this in two steps. ${t.resume ? "Step 1 has your resume for this job attached. " : ""}${t.cover ? "Your cover letter is attached too. " : ""}${t.cover_note ? esc(t.cover_note) + " " : ""}Check it in the view below, then click <b>Step 2: External Application</b> yourself (that sends Step 1 to the employer and opens their page). Then click <b>Fill in</b> here.`
     : t.kind === "account"
     ? "This site wants you to sign in or create an account first. Do that on the page (the agent never types passwords), then click <b>Fill in again</b>."
     : "Answer anything else on the page and click its <b>Submit</b> button yourself. If the form has more pages, click <b>Fill in again</b> on each.";
@@ -888,7 +1006,7 @@ function employerBanner() {
     <div class="btn-row"><button class="btn small" id="empFill">${t.kind === "two-step" ? "Fill in" : "Fill in again"}</button><button class="btn small green" id="empDone">I applied</button><button class="btn small" id="empClose">Not now</button></div>`;
   $("#empFill").onclick = (e) => withBusy(e.currentTarget, "Filling…", async () => {
     const r = await post(`/api/jobs/${t.id}/employer-fill`, JSON.stringify({ target: t.target }));
-    t.filled = [...new Set([...(t.filled || []), ...(r.filled || [])])]; t.resume = t.resume || r.resume; t.target = r.target || t.target;
+    t.filled = [...new Set([...(t.filled || []), ...(r.filled || [])])]; t.resume = t.resume || r.resume; t.cover = t.cover || r.cover; t.target = r.target || t.target;
     t.kind = r.account ? "account" : "form";
     toast(r.filled?.length || r.resume ? "Filled in what it could." : "Nothing new to fill on this page.", true); employerBanner();
   });

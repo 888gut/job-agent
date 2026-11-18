@@ -46,6 +46,8 @@ DEFAULT_SETTINGS = {
     # Applying
     "daily_cap": 15,
     "dry_run": True,          # stop right before the final Submit click
+    "cover_letters": True,    # write a cover letter when an application asks for one
+    "cover_letters_always": False,  # ...or for every application that has a place for one
     # Schedule
     "schedule_enabled": False,
     "schedule_hours": 4,

@@ -61,6 +61,12 @@ The job moves to **Needs you** when:
 
 Click **Open in browser**, finish the application, then click **I applied** so it's logged.
 
+## Cover letters
+- **Settings > Cover letters** (on by default): the agent writes a letter when an application asks for one. Tick **Always** to have one written for every application you approve.
+- The **Cover Letters** tab: pick a job from your queue (or paste a posting), pick the resume it's written from (the agent's pick is preselected; a tailored branch resume keeps the letter in step with the resume you send), and optionally add a prompt such as "Lead with my shipping work" or the application's own question.
+- The letter may only say what your resumes, transcript and confirmed Career Facts say. A sentence that adds anything else is rewritten once, then left out, and listed under the letter. To use something new, confirm it on Career Facts first.
+- Each letter is a Google Doc in the storage account's Drive folder. Edit it there if you like: the agent exports a fresh PDF each time it attaches it. Letters uploaded to Handshake are reused, and unused copies are cleaned up weekly like resume copies.
+
 ## What the tailoring will and won't do
 Tailoring rewords and reorders what's already in your resume to match the job's language. It only touches bullets, the summary and skill lines. Your name, contact line, headings, job titles, companies and dates are locked.
 

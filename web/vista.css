@@ -871,3 +871,10 @@ a.btn, a.btn:hover { text-decoration: none; }
 .hs-next.emp .emp-text { flex: 1 1 360px; min-width: 0; }
 .hs-next.emp .btn-row { margin-left: auto; }
 .hs-next.emp .btn { margin-left: 0; }
+
+/* ---------------- Cover Letters ---------------- */
+.cl-steps { margin: 0; padding-left: 20px; }
+.cl-steps li { margin: 3px 0; }
+#clJob, #clResume { width: 100%; min-width: 0; text-overflow: ellipsis; }
+@media (max-width: 720px) { .cl-item { grid-template-columns: minmax(0, 1fr); } .cl-item .btn-row { justify-content: flex-start; } }
+.cl-text { white-space: pre-wrap; border: 1px solid var(--line); background: var(--client); padding: 8px 10px; border-radius: 3px; margin-top: 6px; max-height: 360px; overflow: auto; }

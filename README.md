@@ -34,6 +34,10 @@ flowchart LR
 - **One-click Start:** you choose from the ranked list, and the agent applies one by one at a human pace.
   - It stops at a daily limit, and it never gets around CAPTCHAs or bot checks.
   - Anything it can't safely finish is marked "Needs you".
+- **Cover letters:** when an application asks for one, the agent writes a short letter for that job and attaches it (Handshake's cover letter slot or the employer's form).
+  - It's written only from the resume being sent (an original or a tailored branch copy) and confirmed career facts. Every sentence is fact-checked like the resume edits, so nothing new gets in; trading stays described as personal, and tool skills are never overstated.
+  - The **Cover Letters** tab lets you write one yourself: pick the job (or paste a posting), pick the resume it's written from, and optionally prompt it, e.g. with the application's question. The prompt steers focus and tone but is never treated as a fact.
+  - Each letter is a Google Doc you can edit; a fresh PDF is exported whenever it's attached.
 - **Tracking:** applications go to a Google Sheet, with a link to the exact resume Doc that was sent. Handshake emails update each application's status.
 
 ## Engineering highlights
