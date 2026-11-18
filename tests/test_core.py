@@ -1387,6 +1387,81 @@ def test_cover_letter_drops_rejected_sentences_after_one_retry(monkeypatch):
         cover_letter.write_letter(CL_JOB, CL_RESUME, "", "", "m")                   # nothing true left: no letter
 
 
+# ---------------- the Scribe sub-agent (fake Claude: scripted tool calls) ----------------
+CL_GOOD = ["I'm applying for the Operations Analyst role at Acme Logistics. "
+           + "At Target, I built dashboards in Excel to track weekly sales for the store team. " * 4,
+           "I also trained 6 new hires on checkout procedures, and I'm eager to learn cost estimating. " * 4]
+
+
+def test_scribe_subagent_checks_rewrites_and_submits(monkeypatch):
+    from app import cover_letter
+    from app.db import ClaudeCall, init_db, session
+    from sqlmodel import select
+
+    init_db()
+    monkeypatch.setattr(cover_letter, "ask_json", lambda *a, **k: pytest.fail("fell back to the single call"))
+    bad = [CL_GOOD[0] + " I worked at Walmart.", CL_GOOD[1]]
+    msgs = _scripted(monkeypatch, [
+        _tool_turn(("check_letter", {"paragraphs": bad})),
+        _tool_turn(("submit_letter", {"paragraphs": bad})),
+        _tool_turn(("submit_letter", {"paragraphs": CL_GOOD})),
+    ])
+    with session() as s:
+        before = len(s.exec(select(ClaudeCall).where(ClaudeCall.purpose == "Scribe")).all())
+    paras, rejected = cover_letter.write_letter(CL_JOB, CL_RESUME, "", "", "claude-opus-5-5", "Lead with sales.")
+    assert paras == [p.strip() for p in CL_GOOD] and rejected == [] and len(msgs.calls) == 3
+
+    first = msgs.calls[0]
+    assert first["model"] == "claude-opus-5-5" and first["output_config"] == {"effort": "medium"}
+    assert first["fallbacks"] == "default" and first["cache_control"] == {"type": "ephemeral"}
+    assert {t["name"] for t in first["tools"]} == {"check_letter", "submit_letter"} and all(t["strict"] for t in first["tools"])
+    prefix, job_part = first["messages"][0]["content"]
+    assert prefix["cache_control"] == {"type": "ephemeral"} and "RESUME BEING SENT" in prefix["text"]
+    assert "Lead with sales." in job_part["text"] and "Lead with sales." not in prefix["text"]
+
+    checked = msgs.calls[1]["messages"][-1]["content"][0]
+    assert "I worked at Walmart." in checked["content"] and "Walmart" in checked["content"] and not checked["is_error"]
+    refused = msgs.calls[2]["messages"][-1]["content"][0]
+    assert refused["is_error"] and "Not submitted" in refused["content"]
+    with session() as s:
+        after = len(s.exec(select(ClaudeCall).where(ClaudeCall.purpose == "Scribe")).all())
+    assert after - before == 3                                   # every request recorded as LetterDraft (Scribe)
+
+
+def test_scribe_subagent_cannot_bypass_the_final_check(monkeypatch):
+    from app import cover_letter
+
+    monkeypatch.setattr(cover_letter, "AGENT_TURNS", 1)         # last turn: the submit is accepted as-is
+    monkeypatch.setattr(cover_letter, "ask_json", lambda *a, **k: pytest.fail("fell back to the single call"))
+    _scripted(monkeypatch, [_tool_turn(("submit_letter", {"paragraphs": [
+        CL_GOOD[0] + " As a professional trader, I managed risk.", CL_GOOD[1] + " I have advanced Power BI skills."]}))])
+    paras, rejected = cover_letter.write_letter(CL_JOB, CL_RESUME, "", "", "claude-opus-5-5")
+    text = " ".join(paras)
+    assert "professional" not in text and "Power BI" not in text
+    assert {r["text"] for r in rejected} == {"As a professional trader, I managed risk.", "I have advanced Power BI skills."}
+
+
+def test_scribe_subagent_falls_back_to_one_call(monkeypatch):
+    from app import cover_letter
+
+    calls = []
+    monkeypatch.setattr(cover_letter, "ask_json",
+                        lambda *a, **k: calls.append(1) or cover_letter.LetterDraft(paragraphs=CL_GOOD))
+    refusal = SimpleNamespace(stop_reason="refusal", content=[], model="m", usage=None)
+    msgs = _scripted(monkeypatch, [refusal])                     # refusal -> straight to the fallback
+    paras, _ = cover_letter.write_letter(CL_JOB, CL_RESUME, "", "", "claude-opus-5-5")
+    assert len(msgs.calls) == 1 and len(calls) == 1 and len(paras) == 2
+
+    msgs = _scripted(monkeypatch, [_tool_turn(("check_letter", {"paragraphs": CL_GOOD}))] * 20)   # never submits
+    paras, _ = cover_letter.write_letter(CL_JOB, CL_RESUME, "", "", "claude-opus-5-5")
+    assert len(msgs.calls) == cover_letter.AGENT_TURNS and len(calls) == 2 and len(paras) == 2
+
+    msgs = _scripted(monkeypatch, [_tool_turn(("submit_letter", {"paragraphs": ["Too short."]}))])
+    monkeypatch.setattr(cover_letter, "AGENT_TURNS", 1)         # accepted, but too short after the final check
+    paras, _ = cover_letter.write_letter(CL_JOB, CL_RESUME, "", "", "claude-opus-5-5")
+    assert len(calls) == 3 and len(paras) == 2
+
+
 def _text_pdf(path, text):
     doc = pymupdf.open()
     page = doc.new_page()

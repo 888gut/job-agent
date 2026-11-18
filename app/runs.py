@@ -250,7 +250,7 @@ SPECIALISTS = [
     {"name": "Tailor", "kind": "subagent", "effort": "high",
      "role": "Rewords resume bullets for a job, using only verified facts, so it stays one page.",
      "code": "tailor.plan_tailoring"},
-    {"name": "Scribe", "kind": "claude", "effort": "medium", "role": "Writes cover letters, fact-checked against your sources.",
+    {"name": "Scribe", "kind": "subagent", "effort": "medium", "role": "Writes cover letters, fact-checked against your sources.",
      "code": "cover_letter"},
     {"name": "Courier", "kind": "code", "effort": "",
      "role": "Drives the agent's Chrome on Handshake: attaches the resume and submits, at a human pace.",

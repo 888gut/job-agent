@@ -27,7 +27,7 @@ from sqlmodel import select
 from . import facts, google_store
 from .config import RESUMES
 from .db import CoverLetter, Job, TailoredResume, get_settings, log, now, session
-from .llm import ask_json
+from .llm import ToolReply, ask_json, run_tools
 from .tailor import guardrail
 
 LETTERS = RESUMES / "cover_letters"
@@ -158,17 +158,91 @@ It is NOT a source of facts about the candidate: anything it mentions that the r
 the other verified sources don't show must be left out."""
 
 
+# ---------------- the Scribe sub-agent: draft, check with a tool, rewrite, submit ----------------
+AGENT_TURNS = 7
+MIN_WORDS = 120
+
+AGENT_SYSTEM = SYSTEM + f"""
+
+HOW TO WORK (you have tools)
+- check_letter(paragraphs) runs the exact fact check every sentence must pass and answers "ok"
+  or lists each failing sentence with the reason.
+- Write the whole letter, check it, then rewrite only the failing sentences so they say what the
+  sources support (or remove the claim) and check again.
+- When the check says "ok", call submit_letter once with exactly those paragraphs.
+- You have at most {AGENT_TURNS} turns in total, so don't spend them on checks you don't need."""
+
+_PARAS = {"type": "array", "items": {"type": "string"}, "description": "The body paragraphs, in order."}
+AGENT_TOOLS = [
+    {
+        "name": "check_letter",
+        "description": "Fact-check the letter's body paragraphs against the resume being sent and the other verified "
+                       "sources. Returns 'ok' or each failing sentence with what to fix.",
+        "input_schema": {"type": "object", "properties": {"paragraphs": _PARAS},
+                         "required": ["paragraphs"], "additionalProperties": False},
+    },
+    {
+        "name": "submit_letter",
+        "description": "Submit the final letter body and finish. Submit only paragraphs that passed check_letter.",
+        "input_schema": {"type": "object", "properties": {"paragraphs": _PARAS},
+                         "required": ["paragraphs"], "additionalProperties": False},
+    },
+]
+
+
+def _words(paragraphs: list[str]) -> int:
+    return sum(len(p.split()) for p in paragraphs)
+
+
+def agent_letter(job: dict, resume_text: str, verified_all: str, *, user: str, stable: str,
+                 model: str) -> list[str]:
+    """Run the Scribe sub-agent; returns the submitted paragraphs. Raises on any failure (the
+    caller falls back to the single call + retry)."""
+
+    def report(paragraphs: list[str]) -> list[dict]:
+        return check_letter([str(p) for p in paragraphs], verified_all, resume_text, job)[1]
+
+    def handle(name: str, args: dict, turns_left: int) -> ToolReply:
+        paragraphs = [str(p).strip() for p in args.get("paragraphs") or [] if str(p).strip()]
+        if name not in ("check_letter", "submit_letter"):
+            return ToolReply(f"unknown tool {name}", is_error=True)
+        failing = report(paragraphs)
+        lines = "\n".join(f"- \"{r['text']}\": {', '.join(r['problems'])}" for r in failing)
+        if name == "check_letter":
+            size = f"({_words(paragraphs)} words in {len(paragraphs)} paragraphs)"
+            return ToolReply(f"ok {size}" if not failing else f"{len(failing)} sentence(s) fail {size}:\n{lines}")
+        if (failing or _words(paragraphs) < MIN_WORDS or len(paragraphs) < 2) and turns_left > 0:
+            why = lines or f"the letter needs at least {MIN_WORDS} words in 2+ paragraphs"
+            return ToolReply(f"Not submitted. Fix these and submit again:\n{why}", is_error=True)
+        return ToolReply("submitted", done=True, value=paragraphs)
+
+    return run_tools(AGENT_SYSTEM, user, AGENT_TOOLS, handle, purpose="LetterDraft", model=model,
+                     effort="medium", max_turns=AGENT_TURNS, cached_prefix=stable,
+                     nudge="Please check the letter with check_letter, then finish with submit_letter.")
+
+
 def write_letter(job: dict, resume_text: str, verified: str, facts_text: str, model: str,
                  prompt: str = "") -> tuple[list[str], list[dict]]:
-    """Ask Claude for the letter, fact-check it, ask once more for anything rejected, then drop
-    whatever still fails. Returns (paragraphs, rejected sentences). `prompt` (optional) steers focus
-    and tone or carries the employer's question; it never counts as a verified source."""
+    """Scribe drafts the letter, checks it with a tool, rewrites what fails and submits; if the
+    sub-agent fails, one structured call plus one retry with feedback does it instead. Either way
+    the same fact check runs again here and drops whatever still fails. Returns (paragraphs,
+    rejected sentences). `prompt` (optional) steers focus and tone or carries the employer's
+    question; it never counts as a verified source."""
     verified_all = f"{resume_text}\n{verified}"
     stable = (f"RESUME BEING SENT WITH THIS APPLICATION\n{resume_text}\n\n"
               f"OTHER VERIFIED SOURCES\n{facts_text or '(none beyond this resume)'}")
     user = f"JOB POSTING\nTitle: {job['title']}\nCompany: {job['company']}\n\n{job.get('description', '')}"
     if prompt.strip():
         user += f"\n\n{PROMPT_NOTE}\n<request>\n{prompt.strip()[:2000]}\n</request>"
+    try:
+        paragraphs = agent_letter(job, resume_text, verified_all, user=user, stable=stable, model=model)
+        # final check: runs on every letter, however it was made, so nothing unsafe gets through
+        kept, rejected = check_letter(paragraphs, verified_all, resume_text, job)
+        if _words(kept) >= MIN_WORDS and len(kept) >= 2:
+            return kept, rejected
+        print("[warn] Scribe's letter was too short after the final check; using one call instead")
+    except Exception as e:  # any sub-agent failure -> the original single call + retry
+        print(f"[warn] Scribe sub-agent failed ({type(e).__name__}: {e}); using one call instead")
     draft = ask_json(LetterDraft, SYSTEM, user, model=model, effort="medium", cached_prefix=stable)
     kept, rejected = check_letter(draft.paragraphs, verified_all, resume_text, job)
     if rejected:
@@ -176,9 +250,9 @@ def write_letter(job: dict, resume_text: str, verified: str, facts_text: str, mo
         retry = ask_json(LetterDraft, SYSTEM, f"{user}\n\n{RETRY}\n{feedback}", model=model, effort="medium",
                          cached_prefix=stable)
         kept2, rejected2 = check_letter(retry.paragraphs, verified_all, resume_text, job)
-        if sum(len(p.split()) for p in kept2) >= sum(len(p.split()) for p in kept) * 0.8:
+        if _words(kept2) >= _words(kept) * 0.8:
             kept, rejected = kept2, rejected + rejected2
-    if sum(len(p.split()) for p in kept) < 120 or len(kept) < 2:
+    if _words(kept) < MIN_WORDS or len(kept) < 2:
         raise RuntimeError("Couldn't write a cover letter that passes the fact check for this job.")
     return kept, rejected
 

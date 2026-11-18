@@ -15,7 +15,7 @@ Job Agent splits the work into six specialists. Each one has a single job:
 | **Scout** | Reads each Handshake posting and pulls out the details | One Claude request (low effort) |
 | **Matchmaker** | Scores the job against both resumes and the stored tailored copies, and picks the best one | One Claude request (medium effort) |
 | **Tailor** | Rewords resume bullets for the job, using only verified facts, so the resume stays one page | **Sub-agent:** a Claude tool-use loop. It drafts edits, checks each one with a `check_edit` tool (fact guardrail, locked lines, real font-metric line fit), rewrites what fails and submits with `submit_plan`. The same checks run again in code afterwards, so it can't bypass them |
-| **Scribe** | Writes cover letters, fact-checked against the same sources | One Claude request, plus a retry with feedback |
+| **Scribe** | Writes cover letters, fact-checked against the same sources | **Sub-agent:** a Claude tool-use loop. It drafts the letter, checks every sentence with a `check_letter` tool (no new employers, numbers, tools or titles; trading kept personal; no overstated skills), rewrites what fails and submits with `submit_letter`. The same check runs again in code afterwards and drops anything that still fails |
 | **Courier** | Drives the agent's Chrome on Handshake: attaches the resume and submits, at a human pace | Plain code (Playwright) |
 | **Clerk** | Reads the Handshake Gmail, updates each application's status and files the emails | Gmail API, plus one Claude request to sort the emails |
 
