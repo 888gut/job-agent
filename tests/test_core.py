@@ -1725,3 +1725,43 @@ def test_cover_letter_written_from_the_chosen_resume(monkeypatch, tmp_path):
     assert cover_letter.get(0) is None                                      # pasted postings never attach to a job
     cover_letter.delete(solo.id)
     assert all(c["id"] != solo.id for c in cover_letter.list_all())
+
+
+def test_employer_site_applications_are_recorded_as_such(monkeypatch, full_pdf):
+    from app import employer, handshake, pipeline
+    from app.db import Application, Job, Resume, init_db, save_settings, session
+
+    init_db()
+    save_settings({"dry_run": False, "daily_cap": 999, "employer_auto_submit": True})
+    with session() as s:
+        s.add(Resume(slot="A", filename="a.pdf", path=str(full_pdf), text="Sam Doe\nsam@example.com"))
+        job = Job(handshake_id="77", url="https://x/jobs/77", title="Analyst", company="Acme", status="queued", resume_slot="A")
+        s.add(job)
+        s.commit()
+        s.refresh(job)
+    jid = job.id
+    monkeypatch.setattr(pipeline, "resume_pdf_for", lambda job: full_pdf)
+    monkeypatch.setattr(pipeline, "known_doc", lambda pdf: "")
+    monkeypatch.setattr(pipeline, "record_application", lambda jid, via="handshake": calls.append((jid, via)))
+    calls = []
+
+    def fake_hs(fn, *a, **k):
+        if fn is handshake.apply:
+            return handshake.ApplyResult("needs_manual", "This job is applied for on the employer's own site.")
+        assert fn is employer.submit_on_site
+        return {"status": "applied", "note": "Applied on the employer's site.", "doc_id": ""}
+    monkeypatch.setattr(pipeline, "_hs", fake_hs)
+    res = pipeline.approve(jid)
+    assert res["ok"] and "employer's site" in res["message"]
+    assert calls == [(jid, "employer")]
+    with session() as s:
+        assert s.get(Job, jid).status == "applied"
+
+    save_settings({"employer_auto_submit": False})
+    with session() as s:
+        j = s.get(Job, jid)
+        j.status = "queued"
+        s.add(j)
+        s.commit()
+    res = pipeline.approve(jid)
+    assert not res["ok"] and "employer's own site" in res["message"]

@@ -259,8 +259,10 @@ def get_job(job_id: int):
 
 
 @app.post("/api/jobs/{job_id}/approve")
-async def approve(job_id: int):
-    return await asyncio.get_running_loop().run_in_executor(None, pipeline.approve, job_id)
+async def approve(job_id: int, dry_run: bool | None = None):
+    if pipeline.batch["running"]:  # one application at a time in the agent's browser
+        return {"ok": False, "message": "The agent is applying to a batch right now. Try again when it's done."}
+    return await asyncio.get_running_loop().run_in_executor(None, pipeline.approve, job_id, dry_run)
 
 
 @app.post("/api/jobs/{job_id}/skip")
@@ -514,7 +516,7 @@ def applications():
             "tailored": a.tailored, "score": a.score, "status": a.status, "doc_url": a.drive_url,
             "branch": j.branch if a.tailored else "",
             "is_demo": a.is_demo, "email_verified": a.email_verified,
-            "email_note": a.email_note, "email_link": a.email_link,
+            "email_note": a.email_note, "email_link": a.email_link, "via": a.via,
         } for a, j in rows],
     }
 
@@ -723,7 +725,8 @@ async def upload_resume(slot: str, file: UploadFile = File(...), label: str = Fo
 # ---------------- settings & connections ----------------
 EDITABLE = {"queries", "location", "remote_ok", "max_new_per_run", "min_score", "tailor_below", "model",
             "exclude_titles", "skip_part_time", "max_commute_minutes",
-            "daily_cap", "dry_run", "schedule_enabled", "schedule_hours", "cover_letters", "cover_letters_always"}
+            "daily_cap", "dry_run", "schedule_enabled", "schedule_hours", "cover_letters", "cover_letters_always",
+            "employer_auto_submit"}
 
 
 @app.get("/api/settings")

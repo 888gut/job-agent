@@ -146,6 +146,7 @@ class Application(SQLModel, table=True):
     email_verified: bool = False             # Gmail has a confirmation (or the user's sent application)
     email_note: str = ""                     # latest relevant email, e.g. "Nov 18: Recruiter asks for times"
     email_link: str = ""                     # Gmail link to that thread
+    via: str = "handshake"                   # handshake | employer (submitted on the employer's own site)
 
 
 class Setting(SQLModel, table=True):

@@ -48,6 +48,7 @@ DEFAULT_SETTINGS = {
     "dry_run": True,          # stop right before the final Submit click
     "cover_letters": True,    # write a cover letter when an application asks for one
     "cover_letters_always": False,  # ...or for every application that has a place for one
+    "employer_auto_submit": True,  # apply on employers' own sites too (you said no approval needed)
     # Schedule
     "schedule_enabled": False,
     "schedule_hours": 4,

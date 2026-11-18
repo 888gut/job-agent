@@ -491,6 +491,8 @@ def open_for_user(url: str) -> None:
 # Fills only your contact basics on an employer's form, by matching each empty field's label.
 # Never touches password fields, checkboxes, radio buttons, dropdowns or free-text questions.
 FILL_JS = r"""(c) => {
+  const deepAll = (sel, root = document) => { const out = [...root.querySelectorAll(sel)]; for (const n of root.querySelectorAll('*')) if (n.shadowRoot) out.push(...deepAll(sel, n.shadowRoot)); return out; };
+  const rootOf = (el) => { const r = el.getRootNode(); return r && r.querySelector ? r : document; };
   const set = (el, v) => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, v);
     el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -498,7 +500,7 @@ FILL_JS = r"""(c) => {
   };
   const labelOf = (el) => {
     let t = [el.name, el.id, el.placeholder, el.getAttribute('aria-label'), el.getAttribute('autocomplete')].join(' ');
-    if (el.id) { const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l) t += ' ' + l.innerText; }
+    if (el.id) { const l = rootOf(el).querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l) t += ' ' + l.innerText; }
     const p = el.closest('label'); if (p) t += ' ' + p.innerText;
     return t.toLowerCase();
   };
@@ -511,7 +513,7 @@ FILL_JS = r"""(c) => {
   ];
   const filled = [];
   const sel = 'input:not([type]), input[type=text], input[type=email], input[type=tel]';
-  for (const el of document.querySelectorAll(sel)) {
+  for (const el of deepAll(sel)) {
     if (!el.offsetParent || el.value || el.disabled || el.readOnly) continue;
     const l = labelOf(el);
     if (/user.?name|login|password|search|company|employer|school|reference|referr/.test(l)) continue;
@@ -565,9 +567,13 @@ def _fill_employer_page(emp, resume_pdf: Path, upload_name: str | None, contact:
     """Fill contact basics and attach the resume (and the cover letter, when given and the page has
     a place for one) on an employer page. Never clicks Submit."""
     out = {"filled": [], "resume": False, "account": False, "email": "", "cover": False, "cover_wanted": False}
-    mails = [m for m in emp.eval_on_selector_all("a[href^='mailto:']", "els => els.map(e => e.href)") if "@" in m]
-    if mails:
-        out["email"] = mails[0][7:].split("?")[0]
+    # An application by email only when the page has no form at all, and never to a help desk
+    # ("application issues", support, privacy, accessibility...) address.
+    mails = [m[7:].split("?")[0] for m in emp.eval_on_selector_all("a[href^='mailto:']", "els => els.map(e => e.href)") if "@" in m]
+    mails = [m for m in mails if not re.search(r"issue|support|help|privacy|accessib|accommodat|noreply|no-reply|webmaster|feedback", m, re.I)]
+    has_form = any(fr.locator("input:not([type=hidden]), textarea, select").count() for fr in emp.frames)
+    if mails and not has_form:
+        out["email"] = mails[0]
     for frame in emp.frames:  # some job forms (e.g. Greenhouse) sit inside an iframe
         try:
             if frame.locator("input[type=password]").count() and any(
@@ -606,6 +612,51 @@ def _fill_employer_page(emp, resume_pdf: Path, upload_name: str | None, contact:
     return out
 
 
+def _dismiss_app_promo(page) -> None:
+    """Close Handshake's "It's better on the app" pop-up, which sits over the Apply buttons."""
+    try:
+        promo = page.locator("[role=dialog]").filter(has_text=re.compile(r"better on the app", re.I))
+        if not promo.count():
+            return
+        close = promo.first.get_by_role("button", name=re.compile(r"close|dismiss|not now|no thanks|continue (on|in) (the )?(web|browser)", re.I))
+        if close.count():
+            close.first.click()
+        else:
+            page.keyboard.press("Escape")
+        _pause(0.5, 1)
+    except Exception:
+        pass
+
+
+def _load_marks(page) -> dict:
+    """When each other open tab last loaded (a reload changes it)."""
+    marks = {}
+    for p in page.context.pages:
+        if p is page:
+            continue
+        try:
+            marks[id(p)] = p.evaluate("performance.timeOrigin")
+        except Exception:
+            continue
+    return marks
+
+
+def _reloaded_tab(page, before: dict):
+    """The non-Handshake tab that loaded again after the click, if any."""
+    for _ in range(6):
+        for p in page.context.pages:
+            if p is page or "joinhandshake.com" in p.url or p.url in ("", "about:blank"):
+                continue
+            try:
+                if id(p) not in before or p.evaluate("performance.timeOrigin") != before[id(p)]:
+                    p.wait_for_load_state("domcontentloaded")
+                    return p
+            except Exception:
+                continue
+        time.sleep(1)
+    return None
+
+
 def employer_apply(url: str, resume_pdf: Path, upload_name: str | None, contact: dict, doc_id: str = "",
                    cover: dict | None = None) -> dict:
     """Open a posting's 'Apply externally' page in a new tab of the agent's browser, fill your
@@ -617,6 +668,7 @@ def employer_apply(url: str, resume_pdf: Path, upload_name: str | None, contact:
     if (b := _blocker(page)):
         return {"kind": "blocked", "message": b}
     _wait_for_apply_buttons(page)
+    _dismiss_app_promo(page)
     if page.get_by_role("button", name=APPLY_BTN_RX).count():
         return {"kind": "handshake"}
     ext = page.get_by_role("button", name=EXTERNAL_RX)
@@ -625,6 +677,13 @@ def employer_apply(url: str, resume_pdf: Path, upload_name: str | None, contact:
     if not ext.count():
         return {"kind": "none", "message": "Couldn't find the Apply externally button on the posting."}
     emp = None
+    for p in list(page.context.pages):  # leftover employer tabs from earlier tries: Handshake would reuse them
+        if p is not page and "joinhandshake.com" not in p.url:
+            try:
+                p.close()
+            except Exception:
+                pass
+    others = _load_marks(page)
     try:
         with page.context.expect_page(timeout=8000) as info:
             ext.first.click()
@@ -637,6 +696,14 @@ def employer_apply(url: str, resume_pdf: Path, upload_name: str | None, contact:
     except Exception:
         if "joinhandshake.com" not in page.url:  # opened in the same tab instead
             emp = page
+        else:  # or reloaded the employer tab left open by an earlier try
+            emp = _reloaded_tab(page, others)
+    if emp is None:  # after a first visit Handshake asks "Did you apply?" and links "View application" instead
+        link = page.get_by_role("link", name=re.compile(r"view application", re.I))
+        href = link.first.get_attribute("href") if link.count() else ""
+        if href and href.startswith("http") and "joinhandshake.com" not in href:
+            emp = page.context.new_page()
+            emp.goto(href, wait_until="domcontentloaded")
     if emp is None:
         # Some postings open a two-step box instead: Step 1 sends documents through Handshake,
         # Step 2 opens the employer's page. Clicking Step 2 submits Step 1, so that click is yours.
@@ -652,7 +719,8 @@ def employer_apply(url: str, resume_pdf: Path, upload_name: str | None, contact:
         return {"kind": "none", "message": "The employer's application page didn't open."}
     _pause(3, 5)
     result = {"kind": "form", "url": emp.url, "target": _target_id(emp)}
-    if (b := _blocker(emp)):
+    from .employer import challenge_on_page  # a CAPTCHA you'd have to solve, not a hidden background check
+    if (b := challenge_on_page(emp)):
         return {**result, "kind": "page", "message": b, "filled": [], "resume": False}
     filled = _fill_employer_page(emp, resume_pdf, upload_name, contact, cover)
     result.update(filled)

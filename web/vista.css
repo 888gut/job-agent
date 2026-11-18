@@ -184,6 +184,9 @@ a:hover { text-decoration: underline; }
   color: inherit; font: 12px var(--font); cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
 }
 .cmdbar button:hover { border-color: rgba(255,255,255,0.32); background: rgba(255,255,255,0.12); }
+.pill.employer { background: #2f6db3; }
+:root[data-theme="dark"] .pill.employer { background: #2a5c94; }
+.cmdbar button:disabled { opacity: 0.6; cursor: default; border-color: transparent; background: none; }
 .cmdbar .spacer { flex: 1; }
 .cmdbar .theme-toggle { margin-left: 4px; border-color: rgba(255,255,255,0.25); background: rgba(255,255,255,0.06); }
 .cmdbar .theme-toggle[aria-pressed="true"] { border-color: rgba(170,205,240,0.55); background: rgba(255,255,255,0.14); box-shadow: none; }

@@ -602,15 +602,17 @@ def _run_search(run_id: int | None = None) -> None:
         return
 
     state["stage"] = "Searching Handshake"
+    queries = [q.strip() for q in settings["queries"] if q.strip()]
+    log(f"Search started: {len(queries)} Handshake searches.")
     per_query: list[list[tuple[str, str, str]]] = []
     seen_total = 0
-    for q in settings["queries"]:
-        if q.strip():
-            state["stage"] = f"Searching Handshake: {q.strip()}"
-            results = _hs(handshake.search, q.strip())
-            seen_total += len(results)
-            per_query.append([r for r in results
-                              if location_ok(r[2], settings["location"], settings["remote_ok"])])
+    for i, q in enumerate(queries, 1):
+        state["stage"] = f"Searching Handshake ({i} of {len(queries)}): {q}"
+        results = _hs(handshake.search, q)
+        seen_total += len(results)
+        near = [r for r in results if location_ok(r[2], settings["location"], settings["remote_ok"])]
+        per_query.append(near)
+        log(f"Searched '{q}': {len(results)} postings, {len(near)} in your area.")
     # Interleave the searches (best result of each search first) so every kind of role is represented.
     found: dict[str, str] = {}
     for rank in range(max((len(r) for r in per_query), default=0)):
@@ -849,8 +851,10 @@ def upload_name_for(job: Job) -> str:
     return f"{name}_Resume.pdf" if name and len(name) <= 40 else "Resume.pdf"
 
 
-def approve(job_id: int) -> dict:
+def approve(job_id: int, dry_run: bool | None = None) -> dict:
     settings = get_settings()
+    if dry_run is not None:  # a one-off trial run that leaves the Settings switch alone
+        settings = {**settings, "dry_run": dry_run}
     if applied_today() >= int(settings["daily_cap"]):
         return {"ok": False, "message": f"Daily cap of {settings['daily_cap']} applications reached."}
     with session() as s:
@@ -899,6 +903,9 @@ def approve(job_id: int) -> dict:
 
     note_doc_use(result.doc_id, pdf, upload_name_for(job), sent=result.status == "applied")
     cover_letter.note_use(job, result, cover)
+    if (result.status == "needs_manual" and "employer's own site" in result.note
+            and settings.get("employer_auto_submit", True)):
+        return _apply_on_employer_site(job, pdf, settings, cover)
     if result.status == "ready":  # dry run filled everything in: keep it in the queue so it can be submitted later
         _set_status(job_id, "queued", result.note)
         log(f"{job.company}: {result.note}", "info", job_id)
@@ -913,6 +920,79 @@ def approve(job_id: int) -> dict:
     _set_status(job_id, "applied", result.note)
     record_application(job_id)
     return {"ok": True, "message": f"Applied to {job.title} at {job.company}."}
+
+
+def _application_record(job: Job) -> str:
+    """What the employer-form answerer may draw on: contact details, the resume sent, other resumes,
+    confirmed Career Facts and the transcript."""
+    from . import facts
+
+    res = current_resumes()
+    base = res.get(job.resume_slot or "A") or next(iter(res.values()), None)
+    others = [r for r in res.values() if base is None or r.id != base.id]
+    c = contact_for(job)
+    with session() as s:
+        tr = s.get(TailoredResume, job.tailored_id) if job.tailored_id else None
+    resume = (tr.full_text if tr and tr.full_text else "") or (base.text if base else "")
+    return (f"<contact>\nName: {c['name']}\nEmail: {c['email']}\nPhone: {c['phone']}\n</contact>\n\n"
+            f"<resume_sent>\n{resume}\n</resume_sent>\n\n{facts.facts_prompt(others)}")
+
+
+def _apply_on_employer_site(job: Job, pdf: Path, settings: dict, cover: dict | None) -> dict:
+    """The posting takes applications on the employer's own site: fill it and submit it there."""
+    from . import employer, gmail_watch
+
+    name = upload_name_for(job)
+    contact = contact_for(job)
+
+    def make_cover():
+        if not settings.get("cover_letters", True):
+            return None
+        try:
+            return cover_letter.attachment(cover_letter.ensure(job.id, pdf), name)
+        except Exception as e:
+            log(f"Couldn't write the cover letter for {job.company}: {e}", "warn", job.id)
+            return None
+
+    log(f"{job.company} takes applications on its own site: applying there.", "info", job.id)
+    try:
+        r = _hs(employer.submit_on_site, job.url, pdf, name, contact, known_doc(pdf), cover, make_cover,
+                _job_dict(job), _application_record(job), bool(settings["dry_run"]), timeout=900)
+    except FutureTimeout:
+        msg = "The employer's site took too long, so the agent stopped waiting. It may have been submitted: check your email."
+        _set_status(job.id, "needs_manual", msg)
+        return {"ok": False, "message": msg}
+    except Exception as e:
+        msg = f"Couldn't apply on the employer's site: {e}"
+        _set_status(job.id, "needs_manual", msg)
+        log(f"{job.company}: {msg}", "warn", job.id)
+        return {"ok": False, "message": msg}
+    if r.get("doc_id"):
+        note_doc_use(r["doc_id"], pdf, name, sent=r["status"] == "applied")
+    status, note = r["status"], r.get("note", "")
+    if status == "email":
+        try:
+            link = gmail_watch.create_draft(
+                r["email"], f"Application: {job.title}",
+                f"Hello,\n\nI'd like to apply for the {job.title} position at {job.company}. My resume is attached.\n\n"
+                f"Thank you for your consideration,\n{contact['name']}\n{contact['phone']}\n{contact['email']}\n", pdf, name)
+            note = f"This employer takes applications by email. A draft to {r['email']} is in your Gmail Drafts: review it and click Send. ({link})"
+        except Exception:
+            note = f"This employer takes applications by email ({r['email']})."
+    elif status == "handshake":
+        _set_status(job.id, "queued", "Handshake now offers its own Quick apply for this job.")
+        return {"ok": False, "message": "Handshake now offers its own Quick apply for this job; it's back in the queue."}
+    if status == "ready":
+        _set_status(job.id, "queued", note)
+        log(f"{job.company}: {note}", "info", job.id)
+        return {"ok": True, "message": note}
+    if status != "applied":
+        _set_status(job.id, "needs_manual", note)
+        log(f"{job.company}: {note}", "warn", job.id)
+        return {"ok": False, "message": note}
+    _set_status(job.id, "applied", note)
+    record_application(job.id, via="employer")
+    return {"ok": True, "message": f"Applied to {job.title} at {job.company} on the employer's site."}
 
 
 # ---------------- Start: apply to a list of jobs in one go ----------------
@@ -974,11 +1054,11 @@ def apply_batch(job_ids: list[int]) -> None:
         _batch_lock.release()
 
 
-def record_application(job_id: int) -> None:
+def record_application(job_id: int, via: str = "handshake") -> None:
     with session() as s:
         job = s.get(Job, job_id)
         tr = s.get(TailoredResume, job.tailored_id) if job.tailored_id else None
-        app = Application(job_id=job.id, resume_slot=job.resume_slot or "",
+        app = Application(job_id=job.id, resume_slot=job.resume_slot or "", via=via,
                           tailored=tr is not None, score=job.score, drive_url=tr.doc_url if tr else None)
         s.add(app)
         if tr:
@@ -986,7 +1066,7 @@ def record_application(job_id: int) -> None:
             s.add(tr)
         s.commit()
         s.refresh(app)
-    log(f"Applied: {job.title} at {job.company}", "success", job_id)
+    log(f"Applied{' on the employer site' if via == 'employer' else ''}: {job.title} at {job.company}", "success", job_id)
     link = (tr.doc_url or "") if tr else f"Original Resume {job.resume_slot}"
     try:
         row = google_store.append_application(job, app, link, job.branch if tr else "")

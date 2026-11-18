@@ -155,12 +155,27 @@ async function refreshChrome() {
     const r = o.run;
     $("#runStatus").innerHTML = r.running ? `<span class="busy"></span> ${esc(r.stage)}`
       : o.next_run ? `Next search ${fmtTime(o.next_run)}` : (r.last_run ? `Last search ${ago(r.last_run)}` : "Ready");
-    $("#runBtn").disabled = r.running;
+    const rb = $("#runBtn");
+    rb.disabled = r.running;
+    rb.querySelector(".lg").textContent = r.running ? "Searching…" : "Run search now";
+    rb.title = r.running ? "A search is running; its progress shows on the right" : "";
+    watchRun(r.running);
     $("#statusbar").innerHTML = `<span>${o.applied_today} of ${o.settings.daily_cap} applications today</span>
       <span>${o.settings.dry_run ? "Dry run is on (stops before Submit)" : "Live submit mode"}</span>
       <span>${o.settings.schedule_enabled ? "Schedule on" : "Schedule off"}</span>`;
     return o;
   } catch (e) { $("#statusbar").textContent = "Can't reach the agent server."; }
+}
+// While a search runs, keep the top bar's progress current, and say so when it finishes.
+let runTimer = null, runWasRunning = false;
+function watchRun(running) {
+  if (runWasRunning && !running) {
+    toast("Search finished. See Recent activity for what it found.", true);
+    if (["overview", "queue", "activity"].includes(currentPage)) route();  // never mid-edit pages
+  }
+  runWasRunning = running;
+  clearTimeout(runTimer);
+  if (running) runTimer = setTimeout(refreshChrome, 3000);
 }
 $("#runBtn").onclick = async (e) => {
   const btn = e.currentTarget;
@@ -253,6 +268,7 @@ render.queue = async () => {
   refreshChrome();
   const queued = jobs.filter((j) => j.status === "queued").sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
   const top = queued.slice(0, o.top_n);
+  queueAllIds = queued.filter((x) => !x.is_demo).map((x) => x.id);  // for "Approve and submit all"
   const where = (j) => [j.company, j.location].filter(Boolean).map(esc).join(" · ");
   view.innerHTML = `<h1>Approval Queue</h1>
     <p class="subtitle">The best matches from Handshake for your two resumes. Pick the ones you want, then click <b>Start</b> and the agent applies to each one.</p>
@@ -348,9 +364,13 @@ render.search = async () => {
   view.querySelectorAll("[data-app-filter]").forEach((a) => a.addEventListener("click", () => sessionStorage.setItem("appFilter", a.dataset.appFilter)));
 };
 
+let queueAllIds = [];
 function drawBatch(o) {
   const area = $("#batchArea");
   if (!area) return;
+  const allN = queueAllIds.length, searching = o.run?.running;
+  const allBtn = allN ? `<button class="btn primary" id="batchAll" ${searching ? "disabled" : ""}
+      title="${searching ? "Ready once the search running now finishes" : `Every match in the queue (${allN}), not just the ticked ones`}">Approve and submit all (${allN})</button>` : "";
   const b = o.batch, ids = [...view.querySelectorAll(".sel:checked")].map((c) => +c.value);
   const jobsWord = (n) => `${n} job${n === 1 ? "" : "s"}`;
   if (b.running || b.results.length) {
@@ -362,16 +382,16 @@ function drawBatch(o) {
       ${b.results.length ? `<ul class="feed">${b.results.map((r) => `<li><span class="lvl ${r.ok ? "success" : "warn"}" role="img" aria-label="${r.ok ? "Done" : "Needs attention"}">${r.ok ? "✓" : "!"}</span>
         <span><b>${esc(r.title)}</b> <span class="muted">${esc(r.company)}</span><br>${esc(r.message)}</span></li>`).join("")}</ul>` : ""}
       <div class="btn-row">${b.running ? `<button class="btn" id="batchStop">Stop after this one</button>`
-        : `<button class="btn green" id="batchStart" ${ids.length ? "" : "disabled"}>Start again (${ids.length})</button>`}</div></div>`;
+        : `<button class="btn green" id="batchStart" ${ids.length ? "" : "disabled"}>Start again (${ids.length})</button>${allBtn}`}</div></div>`;
   } else {
-    area.innerHTML = `<div class="startbar"><button class="btn green big-start" id="batchStart" ${ids.length ? "" : "disabled"}>▶ Start applying to ${jobsWord(ids.length)}</button>
+    area.innerHTML = `<div class="startbar"><div class="btn-row"><button class="btn green big-start" id="batchStart" ${ids.length ? "" : "disabled"}>▶ Start applying to ${jobsWord(ids.length)}</button>${allBtn}</div>
+      ${searching && allN ? `<p class="hint"><span class="busy" aria-hidden="true"></span> A search is running; <b>Approve and submit all</b> turns on when it finishes and its matches are ready.</p>` : ""}
       <p class="hint">${ids.length ? "" : "<b>Tick at least one job to start.</b> "}Tailored Google Docs are made where needed, your resume is attached, and every application is logged to your Sheet. Anything the agent can't safely finish is marked "Needs you".</p></div>`;
   }
   $("#batchStop")?.addEventListener("click", (e) => withBusy(e.currentTarget, "Stopping…", async () => { const r = await post("/api/apply-batch/stop"); toast(r.message); }));
-  $("#batchStart")?.addEventListener("click", async (e) => {
-    const btn = e.currentTarget;
+  const startBatch = async (btn, ids, title, ok_label) => {
     const ok = await dialog({
-      title: `Apply to ${jobsWord(ids.length)}?`, icon: "i-shield", ok: "Start",
+      title, icon: "i-shield", ok: ok_label,
       body: `<p style="margin:0">${o.settings.dry_run ? "Dry run is on: the agent fills in each application and stops before the final Submit."
         : "The agent will submit each application on Handshake."} It pauses about half a minute between jobs and stops at your daily limit of ${o.settings.daily_cap}.</p>`,
     });
@@ -381,7 +401,10 @@ function drawBatch(o) {
       toast(r.message, r.ok);
       pollBatch();
     });
-  });
+  };
+  $("#batchStart")?.addEventListener("click", (e) => startBatch(e.currentTarget, ids, `Apply to ${jobsWord(ids.length)}?`, "Start"));
+  $("#batchAll")?.addEventListener("click", (e) => startBatch(e.currentTarget, [...queueAllIds],
+    `Approve and submit all ${jobsWord(queueAllIds.length)}?`, "Approve and submit all"));
   if (b.running) pollBatch();
 }
 
@@ -618,7 +641,7 @@ render.applications = async () => {
       <td><div class="co">${logo(a.company, 24)}<span class="co-name" title="${esc(a.company)}">${esc(a.company)}</span>${a.is_demo ? ' <span class="pill demo">Sample</span>' : ""}</div></td>
       <td style="max-width:280px"><div class="ellipsis"><a href="${esc(a.url)}" target="_blank" rel="noopener" title="${esc(a.title)}">${esc(a.title)}</a></div><div class="muted small ellipsis">${esc(a.location)}</div></td>
       <td class="nowrap" title="${esc(toDate(a.applied_at)?.toLocaleString())}">${fmtDate(a.applied_at)}</td>
-      <td class="nowrap"><span class="pill slot">${esc(a.resume_slot)}</span> ${a.tailored ? `<span class="pill tailored" title="${esc(a.branch)}">Tailored</span>` : ""}</td>
+      <td class="nowrap"><span class="pill slot">${esc(a.resume_slot)}</span> ${a.tailored ? `<span class="pill tailored" title="${esc(a.branch)}">Tailored</span>` : ""}${a.via === "employer" ? ' <span class="pill employer" title="Submitted by the agent on the employer\'s own site, not through Handshake">Employer site</span>' : ""}</td>
       <td style="width:150px">${meter(a.score)}</td>
       <td><select data-app="${a.id}" class="stSel" aria-label="${esc(`Status for ${a.title} at ${a.company}`)}">${STATUSES.map((s) => `<option ${s === a.status ? "selected" : ""}>${s}</option>`).join("")}</select>
         ${a.status === "Interview" || a.status === "Offer" ? ` <span class="pill ${esc(a.status)}">New: ${esc(a.status)}</span>` : ""}
@@ -892,6 +915,8 @@ render.settings = async () => {
       <div class="help" id="dryHelp">Keep this on for your first few applications to watch the agent work.</div>
       <span class="label">Cover letters</span><label class="check"><input type="checkbox" id="cover_letters" ${s.cover_letters ? "checked" : ""} aria-describedby="coverHelp"> Write cover letters when an application asks for one</label>
       <span class="label"></span><label class="check"><input type="checkbox" id="cover_letters_always" ${s.cover_letters_always ? "checked" : ""}> Always: write one for every application I approve</label>
+      <span class="label">Employer sites</span><label class="check"><input type="checkbox" id="employer_auto_submit" ${s.employer_auto_submit ?? true ? "checked" : ""} aria-describedby="empHelp"> Apply on employers' own sites too, all the way to Submit</label>
+      <div class="help" id="empHelp">When a posting sends you to the employer's site, the agent fills the form from your resume and confirmed Career Facts, attaches the resume and a cover letter, and submits. It stops ("Needs you") for sign-ins, accounts, CAPTCHAs, or questions your record can't answer. Those applications are tagged <b>Employer site</b>.</div>
       <div class="help" id="coverHelp">A short letter for that job, from the resume being sent and your confirmed Career Facts only. Every sentence is fact-checked; anything that adds a new employer, number, tool or skill is dropped. Each letter is a Google Doc you can edit.</div>
       <label for="daily_cap">Daily limit</label><input type="number" id="daily_cap" min="1" max="100" value="${s.daily_cap}" style="width:90px">
       <span class="label">Automatic search</span><label class="check"><input type="checkbox" id="schedule_enabled" ${s.schedule_enabled ? "checked" : ""}> Search on a schedule while this PC is on</label>
@@ -910,6 +935,7 @@ render.settings = async () => {
       skip_part_time: v("skip_part_time").checked, max_commute_minutes: +v("max_commute_minutes").value,
       max_new_per_run: +v("max_new_per_run").value, model: v("model").value.trim(), dry_run: v("dry_run").checked,
       cover_letters: v("cover_letters").checked, cover_letters_always: v("cover_letters_always").checked,
+      employer_auto_submit: v("employer_auto_submit").checked,
       daily_cap: +v("daily_cap").value, schedule_enabled: v("schedule_enabled").checked, schedule_hours: +v("schedule_hours").value,
     };
     await api("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
