@@ -6,7 +6,7 @@
 
 $root = Split-Path -Parent $PSScriptRoot
 $launcher = Join-Path $PSScriptRoot "server.ps1"
-$icon = Join-Path $root "web\job-agent.ico"
+$icon = Join-Path $root "web\offer-ledger.ico"
 $ps = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 
 $places = @([Environment]::GetFolderPath("Desktop"), [Environment]::GetFolderPath("Programs"))

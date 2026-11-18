@@ -907,3 +907,27 @@ a.btn, a.btn:hover { text-decoration: none; }
 @media (max-width: 1100px) { .spec-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 720px) { .spec-grid { grid-template-columns: 1fr; } }
 .titlebar .title .title-sub { font-weight: 400; opacity: 0.75; }
+
+/* ===== Offer Ledger brand: navy + emerald (see the brand notes: O+L mark, Outfit 800 wordmark) ===== */
+:root {
+  --ol-o: #1d2f5c; --ol-l: #139466;
+  --cmdbar: linear-gradient(180deg, #263d74 0%, #1b2c57 100%); --cmdbar-border: #121f40;
+  --sel-bg: #dfe6f4; --sel-border: #8b9dcb;
+}
+:root[data-theme="dark"] {
+  --ol-o: #c7d6ff; --ol-l: #3fd49a;
+  --cmdbar: linear-gradient(180deg, #1c2c52 0%, #131f3b 100%); --cmdbar-border: #0b1430;
+}
+.titlebar .ol-mark { width: 27px; height: 18px; flex-shrink: 0; }
+.wordmark { font-family: "Outfit", var(--font); font-weight: 800; letter-spacing: -0.02em; font-size: 15px; }
+.wordmark .wm-o { color: var(--ol-o); }
+.wordmark .wm-l { color: var(--ol-l); }
+.titlebar .title .title-sub { font-size: 11.5px; margin-left: 4px; }
+.btn.primary { border-color: #1d2f5c; box-shadow: inset 0 0 0 1px rgba(29,47,92,0.3); }
+.btn.green { border-color: #0e6e4b; background: linear-gradient(180deg, #22b07c 0%, #12875d 100%); }
+.btn.green:hover { border-color: #0b5e40; background: linear-gradient(180deg, #27bd86 0%, #149266 100%); }
+.btn.green:active { background: #117f58; }
+:root[data-theme="dark"] .btn.primary { border-color: #8aa2e0; box-shadow: inset 0 0 0 1px rgba(138,162,224,0.3); }
+:root[data-theme="dark"] .btn.green { border-color: #126947; background: linear-gradient(180deg, #26a974 0%, #17845a 100%); }
+:root[data-theme="dark"] .btn.green:hover { background: linear-gradient(180deg, #2bb57d 0%, #198f62 100%); }
+:root[data-theme="dark"] .btn.green:active { background: #167a53; }

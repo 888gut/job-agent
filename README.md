@@ -1,4 +1,8 @@
+<p><img src="web/offer-ledger-mark.svg" alt="Offer Ledger logo: an O and an L with an arrow cut through where they meet" width="96"></p>
+
 # Offer Ledger, powered by Job Agent
+
+*Applying to jobs is a job for your AI.*
 
 **Offer Ledger** is a local job-search app. Inside it runs **Job Agent**, an AI workflow that searches Handshake for jobs, ranks them against two resumes, tailors a resume for each job (in the same format, without inventing anything), and applies to the jobs you pick with one **Start** click. Every application is logged to Google Sheets.
 

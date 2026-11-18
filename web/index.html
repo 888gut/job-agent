@@ -4,8 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Offer Ledger</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%2398d4ff'/%3E%3Cstop offset='1' stop-color='%231c5aa3'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='3' y='9' width='26' height='19' rx='3' fill='url(%23g)'/%3E%3Cpath d='M11 9V6a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v3' fill='none' stroke='%231c5aa3' stroke-width='2.5'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 80'%3E%3Cdefs%3E%3Cmask id='m' maskUnits='userSpaceOnUse' x='0' y='0' width='120' height='80'%3E%3Crect width='120' height='80' fill='%23fff'/%3E%3Cpath d='M54 35H65V27L79 40L65 53V45H54Z' fill='%23000'/%3E%3C/mask%3E%3C/defs%3E%3Cg mask='url%28%23m%29'%3E%3Cpath fill='%23139466' d='M60 10h24v44h28v16H60z'/%3E%3Cpath fill='%231d2f5c' fill-rule='evenodd' d='M36 10a30 30 0 1 1 0 60a30 30 0 1 1 0-60zm0 15a15 15 0 1 0 0 30a15 15 0 1 0 0-30z'/%3E%3C/g%3E%3C/svg%3E">
   <script>try { if (localStorage.getItem("theme") === "dark") document.documentElement.dataset.theme = "dark"; } catch (e) {}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@800&display=swap">
   <link rel="stylesheet" href="vista.css?v=14">
 </head>
 <body>
@@ -18,6 +21,7 @@
       <linearGradient id="gGray" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f4f4f4"/><stop offset="1" stop-color="#8b98a6"/></linearGradient>
       <linearGradient id="gPurple" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e2c4fb"/><stop offset="1" stop-color="#7b48a8"/></linearGradient>
     </defs>
+    <symbol id="i-ol" viewBox="0 0 120 80"><mask id="olArrowCut" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="80"><rect width="120" height="80" fill="#fff"/><path d="M54 35H65V27L79 40L65 53V45H54Z" fill="#000"/></mask><g mask="url(#olArrowCut)"><path style="fill:var(--ol-l, #139466)" d="M60 10h24v44h28v16H60z"/><path style="fill:var(--ol-o, #1d2f5c)" fill-rule="evenodd" d="M36 10a30 30 0 1 1 0 60a30 30 0 1 1 0-60zm0 15a15 15 0 1 0 0 30a15 15 0 1 0 0-30z"/></g></symbol>
     <symbol id="i-briefcase" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2.5" fill="url(#gBlue)" stroke="#1a4f8c"/><path d="M8.5 7V5.2A1.7 1.7 0 0 1 10.2 3.5h3.6a1.7 1.7 0 0 1 1.7 1.7V7" fill="none" stroke="#1a4f8c" stroke-width="1.6"/><rect x="2" y="7" width="20" height="6" rx="2.5" fill="#fff" opacity=".28"/></symbol>
     <symbol id="i-handshake" viewBox="0 0 165 165"><defs><linearGradient id="gHsBg" x1="125" y1="-3" x2="96" y2="190" gradientUnits="userSpaceOnUse"><stop stop-color="#DDFF55"/><stop offset=".87" stop-color="#C7F542"/><stop offset="1" stop-color="#D3FB52"/></linearGradient><linearGradient id="gHsMark" x1="115" y1="41" x2="39" y2="101" gradientUnits="userSpaceOnUse"><stop stop-color="#052326"/><stop offset="1" stop-color="#073D42"/></linearGradient></defs><rect width="165" height="165" rx="35.6" fill="url(#gHsBg)"/><path d="M99.6 33.2 93 70.9 73.5 86.8l9.4-53.6H64L46.5 132.2h18.9l4.9-27.4 19.5-16.1-7.7 43.5H101l17.5-99z" fill="url(#gHsMark)"/></symbol>
     <symbol id="i-sheets" viewBox="0 0 24 24"><path d="M6 1.5h9l5 5V21a1.5 1.5 0 0 1-1.5 1.5h-12.5A1.5 1.5 0 0 1 4.5 21V3A1.5 1.5 0 0 1 6 1.5z" fill="#0f9d58"/><path d="M15 1.5V5a1.5 1.5 0 0 0 1.5 1.5H20z" fill="#87ceac"/><path d="M15 6.5 20 11.5V6.5z" fill="#0b7a44" opacity=".45"/><path d="M7.5 10.5h9v8h-9z" fill="#fff"/><path d="M7.5 13.2h9M7.5 15.8h9M11 10.5v8" stroke="#0f9d58" stroke-width="1.1"/></symbol>
@@ -43,8 +47,8 @@
 
   <div class="window">
     <div class="titlebar">
-      <svg class="app-icon"><use href="#i-briefcase"/></svg>
-      <div class="title">Offer Ledger <span class="title-sub">&mdash; powered by Job Agent</span></div>
+      <svg class="app-icon ol-mark" aria-hidden="true"><use href="#i-ol"/></svg>
+      <div class="title"><span class="wordmark" aria-label="Offer Ledger"><span class="wm-o">Offer</span><span class="wm-l">Ledger</span></span> <span class="title-sub">powered by Job Agent</span></div>
       <div class="caption">
         <button title="Refresh this page" aria-label="Refresh this page" id="refreshBtn">&#8635;</button>
       </div>

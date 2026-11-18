@@ -119,7 +119,7 @@ async function withBusy(btn, label, fn) {
 
 // ---------- chrome ----------
 function setCrumbs(page) {
-  $("#crumbs").innerHTML = `<svg class="icon" style="width:16px;height:16px"><use href="#i-briefcase"/></svg>
+  $("#crumbs").innerHTML = `<svg class="icon" style="width:21px;height:14px" aria-hidden="true"><use href="#i-ol"/></svg>
     <span>Offer Ledger</span><span class="sep">&#9656;</span><span>${PAGES[page]}</span>`;
   document.querySelectorAll("#nav a").forEach((a) => {
     const on = a.dataset.page === page;

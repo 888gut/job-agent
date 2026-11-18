@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80" role="img" aria-label="Offer Ledger">
+  <defs>
+    <mask id="olArrow" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="80">
+      <rect width="120" height="80" fill="#fff"/>
+      <path d="M54 35H65V27L79 40L65 53V45H54Z" fill="#000"/>
+    </mask>
+  </defs>
+  <g mask="url(#olArrow)">
+    <path fill="#139466" d="M60 10h24v44h28v16H60z"/>
+    <path fill="#1d2f5c" fill-rule="evenodd" d="M36 10a30 30 0 1 1 0 60a30 30 0 1 1 0-60zm0 15a15 15 0 1 0 0 30a15 15 0 1 0 0-30z"/>
+  </g>
+</svg>
