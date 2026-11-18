@@ -1,10 +1,25 @@
-# Job Agent: an agentic AI workflow for the job search
+# Offer Ledger, powered by Job Agent
 
-An AI agent that searches Handshake for jobs, ranks them against two resumes, tailors a resume for each job (in the same format, without inventing anything), and applies to the jobs you pick with one **Start** click. Each application is logged to Google Sheets.
+**Offer Ledger** is a local job-search app. Inside it runs **Job Agent**, an AI workflow that searches Handshake for jobs, ranks them against two resumes, tailors a resume for each job (in the same format, without inventing anything), and applies to the jobs you pick with one **Start** click. Every application is logged to Google Sheets.
 
-It runs locally behind a Windows Vista "Aero" style dashboard.
+You use it through a Windows Vista "Aero" style dashboard that runs on your own computer.
 
-> Built with agentic AI: designed and developed with Claude Code, with several AI agents working in parallel (one leading, one optimizing the pipeline, one polishing the dashboard).
+> Built with agentic AI: designed and developed with Claude Code, with several AI coding sessions working in parallel (one leading, others on the pipeline, the dashboard, cover letters and the Tailor sub-agent).
+
+## Job Agent's specialists
+
+Job Agent splits the work into six specialists. Each one has a single job:
+
+| Specialist | What it does | How |
+|---|---|---|
+| **Scout** | Reads each Handshake posting and pulls out the details | One Claude request (low effort) |
+| **Matchmaker** | Scores the job against both resumes and the stored tailored copies, and picks the best one | One Claude request (medium effort) |
+| **Tailor** | Rewords resume bullets for the job, using only verified facts, so the resume stays one page | **Sub-agent:** a Claude tool-use loop. It drafts edits, checks each one with a `check_edit` tool (fact guardrail, locked lines, real font-metric line fit), rewrites what fails and submits with `submit_plan`. The same checks run again in code afterwards, so it can't bypass them |
+| **Scribe** | Writes cover letters, fact-checked against the same sources | One Claude request, plus a retry with feedback |
+| **Courier** | Drives the agent's Chrome on Handshake: attaches the resume and submits, at a human pace | Plain code (Playwright) |
+| **Clerk** | Reads the Handshake Gmail, updates each application's status and files the emails | Gmail API, plus one Claude request to sort the emails |
+
+The dashboard's **Specialists** page shows what each one did in the last 30 days. **Claude Usage** shows tokens and estimated cost by specialist.
 
 ## What it does
 
@@ -50,6 +65,7 @@ flowchart LR
 | Backend | Python, FastAPI, SQLModel/SQLite (WAL), APScheduler |
 | Integrations | Google Sheets, Docs, Drive and Gmail (OAuth), and Handshake through Playwright using the user's own signed-in session |
 | Frontend | Vanilla JS + CSS: a Windows Vista Aero theme with a light/dark toggle, keyboard accessible, and a phone layout |
+| Observability | Every search and apply run is recorded with its funnel (found, in area, read, queued, skipped). Every Claude call is recorded with its tokens, cache reads and estimated cost, shown per specialist |
 | Tests | pytest suite covering layout parsing, fit checks, guardrails, Docs edit requests, branch reuse, the parallel pipeline and batch applying |
 
 ## Run it

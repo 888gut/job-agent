@@ -1,5 +1,5 @@
 @echo off
-rem Starts the Job Agent in the background (no console window) and opens the dashboard.
+rem Starts Offer Ledger in the background (no console window) and opens the dashboard.
 cd /d "%~dp0"
 if not exist .venv (
   echo Setting up for the first time...

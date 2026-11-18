@@ -13,7 +13,7 @@ from pathlib import Path
 import pymupdf
 from sqlmodel import func, select
 
-from . import cover_letter, facts, google_store, handshake, layout
+from . import cover_letter, facts, google_store, handshake, layout, runs
 from .config import MASTERS, TAILORED
 from .db import Application, HandshakeDoc, Job, Resume, TailoredResume, get_settings, log, now, save_settings, session
 from .matcher import best_fit, extract_job, score_job, screen
@@ -574,17 +574,19 @@ def run_search() -> None:
         log("A search is already running.", "warn")
         return
     state.update(running=True, stage="Starting", last_error=None)
+    run_id = runs.start("search", [q.strip() for q in get_settings()["queries"] if q.strip()])
     try:
-        _run_search()
+        _run_search(run_id)
     except Exception as e:
         state["last_error"] = str(e)
         log(f"Search run stopped: {e}", "error")
     finally:
+        runs.finish(run_id, error=state["last_error"] or "")
         state.update(running=False, stage="Idle", last_run=now().isoformat())
         _run_lock.release()
 
 
-def _run_search() -> None:
+def _run_search(run_id: int | None = None) -> None:
     settings = get_settings()
     resumes = current_resumes()
     if not resumes:
@@ -619,6 +621,7 @@ def _run_search() -> None:
         known = set(s.exec(select(Job.handshake_id).where(Job.handshake_id.in_(list(found) or [""]))))
     new = [(h, u) for h, u in found.items() if h not in known][: int(settings["max_new_per_run"])]
     log(f"Found {seen_total} postings, {len(found)} in your area, reviewing {len(new)} new ones.")
+    runs.note(run_id, seen=seen_total, in_area=len(found), reviewed=len(new))
     _review_postings(new, resume_texts, settings)
 
 
@@ -930,6 +933,8 @@ def apply_batch(job_ids: list[int]) -> None:
     if not _batch_lock.acquire(blocking=False):
         return
     batch.update(running=True, total=len(job_ids), done=0, current="", results=[], stop=False)
+    run_id = runs.start("apply")
+    error = ""
     try:
         for i, jid in enumerate(job_ids):
             if batch["stop"]:
@@ -958,7 +963,13 @@ def apply_batch(job_ids: list[int]) -> None:
                 _sleep_unless_stopped(random.uniform(20, 45))  # human pace, gentler on your account
         ok = sum(1 for r in batch["results"] if r["ok"])
         log(f"Start run finished: {ok} of {len(batch['results'])} done.", "success" if ok else "warn")
+    except Exception as e:
+        error = str(e)
+        raise
     finally:
+        runs.finish(run_id, error=error, attempted=len(batch["results"]),
+                    applied=sum(1 for r in batch["results"] if r["ok"]),
+                    needs_you=sum(1 for r in batch["results"] if not r["ok"]))
         batch.update(running=False, current="")
         _batch_lock.release()
 

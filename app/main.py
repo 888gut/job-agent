@@ -3,6 +3,7 @@ import asyncio
 import json
 import re
 import shutil
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -13,7 +14,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import func, select
 
-from . import cover_letter, demo, facts, gmail_watch, google_store, handshake, layout, live, pipeline
+from . import cover_letter, demo, facts, gmail_watch, google_store, handshake, layout, live, pipeline, runs
 from .config import GOOGLE_CLIENT_FILE, MASTERS, RESUMES, WEB
 from .db import (Application, Job, LogEvent, ProfileFact, Resume, TailoredResume, get_settings, init_db, log,
                  now, save_settings, session)
@@ -73,7 +74,7 @@ async def lifespan(_app: FastAPI):
     handshake.run(handshake.close)
 
 
-app = FastAPI(title="Job Agent", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Offer Ledger", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 # ---------------- local-only protection ----------------
 # The dashboard holds personal data and can act on your accounts, so only this PC's own
@@ -116,11 +117,15 @@ async def local_only(request, call_next):
 
 
 # ---------------- serializers ----------------
-def tailored_out(tr: TailoredResume | None, job_id: int | None = None) -> dict | None:
+_LOOKUP = object()   # "not passed: look it up" (lists pass what they already loaded)
+
+
+def tailored_out(tr: TailoredResume | None, job_id: int | None = None, made_for=_LOOKUP) -> dict | None:
     if not tr:
         return None
-    with session() as s:
-        made_for = s.get(Job, tr.created_for_job_id) if tr.created_for_job_id else None
+    if made_for is _LOOKUP:
+        with session() as s:
+            made_for = s.get(Job, tr.created_for_job_id) if tr.created_for_job_id else None
     return {
         "id": tr.id, "slot": tr.slot, "branch": tr.branch, "doc_url": tr.doc_url, "uses": tr.uses,
         "edits": json.loads(tr.edits_json), "rejected": json.loads(tr.rejected_json),
@@ -133,17 +138,19 @@ def tailored_out(tr: TailoredResume | None, job_id: int | None = None) -> dict |
     }
 
 
-def job_out(j: Job) -> dict:
-    with session() as s:
-        tr = s.get(TailoredResume, j.tailored_id) if j.tailored_id else None
+def job_out(j: Job, tr=_LOOKUP, made_for=_LOOKUP, description: bool = True) -> dict:
+    if tr is _LOOKUP:
+        with session() as s:
+            tr = s.get(TailoredResume, j.tailored_id) if j.tailored_id else None
     return {
         "id": j.id, "handshake_id": j.handshake_id, "url": j.url, "title": j.title, "company": j.company,
         "location": j.location, "job_type": j.job_type, "deadline": j.deadline, "apply_type": j.apply_type,
         "status": j.status, "score": j.score, "resume_slot": j.resume_slot, "branch": j.branch,
         "reasons": json.loads(j.reasons_json), "gaps": json.loads(j.gaps_json), "pitch": j.pitch,
-        "tailored": tailored_out(tr, j.id),
+        "tailored": tailored_out(tr, j.id, made_for),
         "cover_letter": cover_letter.out(j.id),
-        "note": j.note, "is_demo": j.is_demo, "found_at": j.found_at.isoformat(), "description": j.description,
+        "note": j.note, "is_demo": j.is_demo, "found_at": j.found_at.isoformat(),
+        **({"description": j.description} if description else {}),
     }
 
 
@@ -156,6 +163,7 @@ def overview():
         counts = dict(s.exec(select(Job.status, func.count()).group_by(Job.status)).all())
         avg = s.exec(select(func.avg(Job.score)).where(Job.status.in_(["queued", "applied", "needs_manual"]))).one()
         jobs = {j.id: j for j in s.exec(select(Job).where(Job.id.in_([a.job_id for a in apps])))}
+        facts_pending = s.exec(select(func.count()).select_from(ProfileFact).where(ProfileFact.confirmed == False)).one()  # noqa: E712
     sj = scheduler.get_job(SEARCH_JOB_ID)
     st = get_settings()
     return {
@@ -178,11 +186,11 @@ def overview():
                        for k in ("Submitted", "Confirmed", "Interview", "Rejected", "Offer")},
         "run": pipeline.state,
         "batch": pipeline.batch,
-        "top_n": int(get_settings().get("top_n", 10)),
+        "top_n": int(st.get("top_n", 10)),
         "next_run": sj.next_run_time.isoformat() if sj and sj.next_run_time else None,
         "demo": demo.has_demo(),
-        "facts_pending": sum(1 for f in facts.all_facts() if not f.confirmed),
-        "settings": {k: get_settings()[k] for k in ("daily_cap", "dry_run", "schedule_enabled")},
+        "facts_pending": facts_pending,
+        "settings": {k: st[k] for k in ("daily_cap", "dry_run", "schedule_enabled")},
     }
 
 
@@ -216,12 +224,29 @@ async def run_now():
 
 # ---------------- jobs ----------------
 @app.get("/api/jobs")
-def list_jobs(status: str = ""):
+def list_jobs(status: str = "", light: bool = False):
+    """Jobs for the dashboard. `light` returns just what a list or search needs. Full rows leave
+    out the posting text (GET /api/jobs/{id} has it) and load their tailored resumes in one go."""
     with session() as s:
         q = select(Job).order_by(Job.score.desc(), Job.found_at.desc())
         if status:
             q = q.where(Job.status.in_(status.split(",")))
-        return [job_out(j) for j in s.exec(q)]
+        jobs = list(s.exec(q))
+        if light:
+            return [{"id": j.id, "url": j.url, "title": j.title, "company": j.company, "location": j.location,
+                     "status": j.status, "score": j.score, "is_demo": j.is_demo} for j in jobs]
+        tr_ids = {j.tailored_id for j in jobs if j.tailored_id}
+        trs = {t.id: t for t in s.exec(select(TailoredResume).where(TailoredResume.id.in_(tr_ids)))} if tr_ids else {}
+        by_id = {j.id: j for j in jobs}
+        missing = {t.created_for_job_id for t in trs.values() if t.created_for_job_id} - by_id.keys()
+        if missing:
+            by_id.update({j.id: j for j in s.exec(select(Job).where(Job.id.in_(missing)))})
+    out = []
+    for j in jobs:
+        tr = trs.get(j.tailored_id) if j.tailored_id else None
+        made_for = by_id.get(tr.created_for_job_id) if tr and tr.created_for_job_id else None
+        out.append(job_out(j, tr, made_for, description=False))
+    return out
 
 
 @app.get("/api/jobs/{job_id}")
@@ -950,9 +975,21 @@ def _git(*args: str) -> str:
     return r.stdout if r.returncode == 0 else ""
 
 
+_github_cache: dict = {"at": 0.0, "data": None}
+
+
 @app.get("/api/github")
 def github():
-    """The project's commit history (local git) and its GitHub link, for the portfolio page."""
+    """The project's commit history (local git) and its GitHub link, for the portfolio page.
+    Kept for a minute: reading the git history takes a few hundred milliseconds."""
+    if _github_cache["data"] is not None and time.time() - _github_cache["at"] < 60:
+        return _github_cache["data"]
+    data = _github_history()
+    _github_cache.update(at=time.time(), data=data)
+    return data
+
+
+def _github_history() -> dict:
     remote = _git("config", "--get", "remote.origin.url").strip()
     web = remote[:-4] if remote.endswith(".git") else remote
     if web.startswith("git@github.com:"):
@@ -980,12 +1017,33 @@ def github():
             "total_commits": int(total) if total.isdigit() else 0, "commits": commits}
 
 
+# ---------------- search runs & Claude usage ----------------
+@app.get("/api/runs")
+def run_history(limit: int = 50):
+    return runs.list_runs(min(max(limit, 1), 200))
+
+
+@app.get("/api/usage")
+def claude_usage(days: int = 30):
+    return runs.usage_summary(min(max(days, 1), 365))
+
+
+@app.get("/api/specialists")
+def specialist_list(days: int = 30):
+    return runs.specialists(min(max(days, 1), 365))
+
+
 # ---------------- log & demo ----------------
 @app.get("/api/log")
-def activity(limit: int = 200):
+def activity(limit: int = 200, after: int = 0):
+    """Newest events first. `after`: only events newer than that id (the page's auto-refresh)."""
     with session() as s:
-        rows = s.exec(select(LogEvent).order_by(LogEvent.ts.desc()).limit(limit)).all()
-    return [{"ts": r.ts.isoformat(), "level": r.level, "message": r.message, "job_id": r.job_id} for r in rows]
+        q = select(LogEvent).order_by(LogEvent.id.desc()).limit(min(max(limit, 1), 1000))
+        if after:
+            q = q.where(LogEvent.id > after)
+        rows = s.exec(q).all()
+    return [{"id": r.id, "ts": r.ts.isoformat(), "level": r.level, "message": r.message, "job_id": r.job_id}
+            for r in rows]
 
 
 @app.post("/api/demo/clear")

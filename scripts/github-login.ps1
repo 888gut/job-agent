@@ -1,7 +1,7 @@
 # Signs this PC's GitHub tool in to your GitHub account (you approve it in your browser).
-$host.UI.RawUI.WindowTitle = "GitHub sign-in for Job Agent"
+$host.UI.RawUI.WindowTitle = "GitHub sign-in for Offer Ledger"
 Write-Host ""
-Write-Host "  GitHub sign-in for Job Agent" -ForegroundColor Cyan
+Write-Host "  GitHub sign-in for Offer Ledger" -ForegroundColor Cyan
 Write-Host "  1. Press Enter when asked. github.com/login/device opens in your browser."
 Write-Host "  2. Paste the one-time code shown below (it is already copied), click Continue, then Authorize."
 Write-Host ""

@@ -1,5 +1,5 @@
 /* ============================================================
-   Job Agent – classic Windows window theme, matte edition.
+   Offer Ledger – classic Windows window theme, matte edition.
    Keeps the Vista-era structure (frame, title bar, command bar,
    caption buttons) but drops the gloss, glow and glass.
    ============================================================ */
@@ -834,6 +834,7 @@ a.btn, a.btn:hover { text-decoration: none; }
   .window.dragging, .window.dragging * { user-select: none; }
 }
 .hs-top { position: relative; }
+.cmdbar .hs-top.active { border-color: rgba(255,255,255,0.45); background: rgba(255,255,255,0.18); }
 .hs-top-dot { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: #3f9a2b; }
 .hs-top-dot.busy { background: #d9930f; }
 .hs-next { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 10px; padding: 10px 12px; border: 1px solid var(--line, #c6d3e0); border-radius: 4px; }
@@ -878,3 +879,31 @@ a.btn, a.btn:hover { text-decoration: none; }
 #clJob, #clResume { width: 100%; min-width: 0; text-overflow: ellipsis; }
 @media (max-width: 720px) { .cl-item { grid-template-columns: minmax(0, 1fr); } .cl-item .btn-row { justify-content: flex-start; } }
 .cl-text { white-space: pre-wrap; border: 1px solid var(--line); background: var(--client); padding: 8px 10px; border-radius: 3px; margin-top: 6px; max-height: 360px; overflow: auto; }
+
+/* ===== Search Runs + Claude Usage ===== */
+.warn-text { color: #9a6511; }
+:root[data-theme="dark"] .warn-text { color: #e6b45c; }
+.kv { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.kv:last-of-type { border-bottom: 0; }
+.bars { display: flex; align-items: flex-end; gap: 4px; height: 150px; padding-top: 6px; }
+.bars .bar { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; }
+.bars .bar i { display: block; width: 100%; max-width: 26px; background: #2f8784; border-radius: 3px 3px 0 0; }
+.bars .bar span { font-size: 10.5px; color: var(--text-dim); margin-top: 3px; line-height: 1; }
+.bars .bar:hover i { background: #3a9d99; }
+
+/* ===== Specialists ===== */
+.spec-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.spec { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 4px; background: var(--client); padding: 12px 14px; min-width: 0; }
+.spec-head { display: flex; gap: 10px; align-items: center; }
+.spec-badge { width: 36px; height: 36px; border-radius: 6px; color: #fff; font-size: 18px; font-weight: 600; display: grid; place-items: center; flex-shrink: 0; }
+.spec-name { font-size: 15px; font-weight: 600; color: var(--heading); }
+.spec-role { margin: 10px 0; flex: 1; }
+.spec-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+.spec-stats > div { display: flex; flex-direction: column; min-width: 0; }
+.spec-stats b { font-size: 16px; font-weight: 600; }
+.spec-stats span { font-size: 11px; color: var(--text-dim); }
+.spec-foot { display: flex; justify-content: space-between; gap: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+.spec-foot code { font-family: Consolas, "Cascadia Mono", monospace; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 1100px) { .spec-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 720px) { .spec-grid { grid-template-columns: 1fr; } }
+.titlebar .title .title-sub { font-weight: 400; opacity: 0.75; }

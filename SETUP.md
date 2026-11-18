@@ -1,11 +1,11 @@
-# Job Agent — Setup
+# Offer Ledger — Setup
 
-A local agent that finds Handshake jobs, matches them to your two resumes, tailors a resume when a job sits a bit outside them, and waits for your one-click approval before it applies. Every application is logged to a Google Sheet in your storage Gmail account.
+Offer Ledger is a local app. Its agent, **Job Agent**, finds Handshake jobs, matches them to your two resumes, tailors a resume when a job sits a bit outside them, and waits for your one-click approval before it applies. Every application is logged to a Google Sheet in your storage Gmail account.
 
 ## 1. Start it
-Double-click **`start.bat`**. The first run installs everything, puts a **Job Agent** icon on your desktop and in the Start menu, then opens the dashboard at <http://127.0.0.1:8765>.
+Double-click **`start.bat`**. The first run installs everything, puts an **Offer Ledger** icon on your desktop and in the Start menu, then opens the dashboard at <http://127.0.0.1:8765>.
 
-After that, just use the **Job Agent** icon. It always runs the latest code in this folder: if the code changed since the server started, it restarts it first (never in the middle of a search or an application run), then opens the dashboard in Chrome. To add the icon again (say, after moving the folder), run `powershell -ExecutionPolicy Bypass -File scripts\install-desktop-icon.ps1`.
+After that, just use the **Offer Ledger** icon. It always runs the latest code in this folder: if the code changed since the server started, it restarts it first (never in the middle of a search or an application run), then opens the dashboard in Chrome. To add the icon again (say, after moving the folder), run `powershell -ExecutionPolicy Bypass -File scripts\install-desktop-icon.ps1`.
 Until you clear it, the dashboard shows **sample data**. Use the yellow bar to clear it.
 
 ## 2. Claude API key
@@ -15,7 +15,7 @@ Until you clear it, the dashboard shows **sample data**. Use the yellow bar to c
 
 ## 3. Google OAuth client (one time, about 5 minutes)
 This lets the agent use **your own** Google project. You'll sign in on Google's page; the agent never sees your password.
-1. Go to <https://console.cloud.google.com>, create a project (any name, e.g. "Job Agent").
+1. Go to <https://console.cloud.google.com>, create a project (any name, e.g. "Offer Ledger").
 2. **APIs & Services → Library**: enable **Google Sheets API**, **Google Drive API**, **Google Docs API** and **Gmail API**.
 3. **APIs & Services → OAuth consent screen**: choose *External*, fill in the app name and your email.
    Under **Test users**, add **both** Gmail addresses (the Handshake one and the storage one).

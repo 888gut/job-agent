@@ -161,6 +161,41 @@ class LogEvent(SQLModel, table=True):
     job_id: Optional[int] = None
 
 
+class AgentRun(SQLModel, table=True):
+    """One search run or one batch of applications, for the dashboard's Search Runs page."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    kind: str = Field(default="search", index=True)   # search | apply
+    started_at: datetime = Field(default_factory=now, index=True)
+    finished_at: Optional[datetime] = None
+    status: str = "running"                  # running | done | error
+    queries_json: str = "[]"                 # search terms used (search runs)
+    seen: int = 0                            # postings Handshake returned
+    in_area: int = 0                         # of those, within your location
+    reviewed: int = 0                        # new postings sent for review
+    queued: int = 0                          # jobs that made the queue
+    skipped: int = 0                         # jobs scored below the minimum
+    needs_you: int = 0
+    errors: int = 0
+    attempted: int = 0                       # apply runs: jobs tried
+    applied: int = 0                         # apply runs: jobs that went through
+    error: str = ""
+
+
+class ClaudeCall(SQLModel, table=True):
+    """Token usage of one Claude API call, for the Claude Usage page. Cost is an estimate."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    ts: datetime = Field(default_factory=now, index=True)
+    run_id: Optional[int] = Field(default=None, index=True)
+    purpose: str = ""                        # the answer type asked for, e.g. "JobExtract"
+    model: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    cost: float = 0.0                        # US dollars, estimated from list prices
+    seconds: float = 0.0
+
+
 def init_db() -> None:
     SQLModel.metadata.create_all(engine)
     _add_missing_columns()

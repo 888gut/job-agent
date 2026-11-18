@@ -1,8 +1,8 @@
-/* Job Agent dashboard – vanilla JS, hash routing */
+/* Offer Ledger dashboard (the app around Job Agent) – vanilla JS, hash routing */
 const $ = (s, el = document) => el.querySelector(s);
 const view = $("#view");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const PAGES = { overview: "Overview", queue: "Approval Queue", covers: "Cover Letters", applications: "Applications", resumes: "Resumes & Transcript", facts: "Career Facts", github: "GitHub", handshake: "Handshake", settings: "Settings", activity: "Activity Log", search: "Search results" };
+const PAGES = { overview: "Overview", queue: "Approval Queue", covers: "Cover Letters", applications: "Applications", resumes: "Resumes & Transcript", facts: "Career Facts", github: "GitHub", handshake: "Handshake", settings: "Settings", activity: "Activity Log", search: "Search results", specialists: "Specialists", usage: "Claude Usage" };
 let currentPage = "overview";
 let pollTimer = null;
 
@@ -27,6 +27,7 @@ $("#refreshBtn").onclick = () => route();
 
 // ---------- api ----------
 async function api(path, opts = {}) {
+  if (opts.method && opts.method !== "GET") ovCache.p = null;  // a change: the next overview is fresh
   const res = await fetch(path, opts);
   if (!res.ok) {
     let msg = res.statusText;
@@ -36,6 +37,15 @@ async function api(path, opts = {}) {
   return res.json();
 }
 const post = (p, body) => api(p, { method: "POST", ...(body ? { body } : {}) });
+// The overview (counts, run state, status bar) is wanted by several parts of a page at once:
+// share one request, and reuse it for a moment.
+let ovCache = { at: 0, p: null };
+function getOverview(maxAge = 1500) {
+  if (ovCache.p && Date.now() - ovCache.at < maxAge) return ovCache.p;
+  const p = api("/api/overview").catch((e) => { if (ovCache.p === p) ovCache.p = null; throw e; });
+  ovCache = { at: Date.now(), p };
+  return p;
+}
 
 // ---------- time ----------
 function toDate(iso) { if (!iso) return null; return new Date(/[zZ]|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z"); }
@@ -58,7 +68,7 @@ function toast(msg, ok = true) {
   t.onclick = () => t.classList.remove("show");
   clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), ok ? 4500 : 7000);
 }
-function dialog({ title, body, ok = "OK", cancel = "Cancel", icon = "i-info", caption = "Job Agent" }) {
+function dialog({ title, body, ok = "OK", cancel = "Cancel", icon = "i-info", caption = "Offer Ledger" }) {
   return new Promise((resolve) => {
     const prevFocus = document.activeElement;
     $("#dlgCaption").textContent = caption; $("#dlgTitle").textContent = title; $("#dlgBody").innerHTML = body;
@@ -110,7 +120,7 @@ async function withBusy(btn, label, fn) {
 // ---------- chrome ----------
 function setCrumbs(page) {
   $("#crumbs").innerHTML = `<svg class="icon" style="width:16px;height:16px"><use href="#i-briefcase"/></svg>
-    <span>Job Agent</span><span class="sep">&#9656;</span><span>${PAGES[page]}</span>`;
+    <span>Offer Ledger</span><span class="sep">&#9656;</span><span>${PAGES[page]}</span>`;
   document.querySelectorAll("#nav a").forEach((a) => {
     const on = a.dataset.page === page;
     a.classList.toggle("active", on);
@@ -118,6 +128,10 @@ function setCrumbs(page) {
     // On a phone the nav is a scrolling taskbar: keep the current page's button in view.
     if (on && matchMedia("(max-width: 720px)").matches) a.scrollIntoView({ inline: "nearest", block: "nearest" });
   });
+  // Handshake lives only in the command bar, so that button shows when you're on its page.
+  const hs = $("#hsTopBtn"), onHs = page === "handshake";
+  hs.classList.toggle("active", onHs);
+  if (onHs) hs.setAttribute("aria-current", "page"); else hs.removeAttribute("aria-current");
 }
 const gmailUrl = (email) => `https://mail.google.com/mail/u/${email ? `?authuser=${encodeURIComponent(email)}` : "0/"}`;
 async function checkGmail(btn) {
@@ -127,7 +141,7 @@ async function checkGmail(btn) {
 
 async function refreshChrome() {
   try {
-    const o = await api("/api/overview");
+    const o = await getOverview();
     const c = $("#queueCount"); c.hidden = !o.awaiting; c.textContent = o.awaiting;
     const fc = $("#factCount"); fc.hidden = !o.facts_pending; fc.textContent = o.facts_pending;
     $("#demoBar").style.display = o.demo ? "" : "none";
@@ -173,7 +187,7 @@ const render = {};
 
 render.overview = async () => {
   const o = await refreshChrome();
-  if (!o) { view._overview = null; view.innerHTML = `<div class="empty"><div class="big">Can't reach the agent server</div>Make sure the Job Agent is running, then click Refresh (&#8635;) in the title bar.</div>`; return; }
+  if (!o) { view._overview = null; view.innerHTML = `<div class="empty"><div class="big">Can't reach the agent server</div>Make sure Offer Ledger is running, then click Refresh (&#8635;) in the title bar.</div>`; return; }
   const p = o.pipeline, total = Object.values(p).reduce((a, b) => a + b, 0) || 1;
   const seg = [["applied", "#3cb31a", "Applied"], ["queued", "#2f86d6", "Awaiting approval"], ["needs_manual", "#e0a316", "Needs you"], ["skipped", "#a3aeb9", "Skipped (low match)"]];
   const log = await api("/api/log?limit=8");
@@ -235,7 +249,7 @@ function feed(rows) {
 
 let batchTimer = null;
 render.queue = async () => {
-  const [jobs, o] = await Promise.all([api("/api/jobs?status=queued,needs_manual"), api("/api/overview")]);
+  const [jobs, o] = await Promise.all([api("/api/jobs?status=queued,needs_manual"), getOverview()]);
   refreshChrome();
   const queued = jobs.filter((j) => j.status === "queued").sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
   const top = queued.slice(0, o.top_n);
@@ -307,7 +321,7 @@ render.search = async () => {
   let q = "";
   try { q = decodeURIComponent(location.hash.split("?q=")[1] || "").trim(); } catch {}
   $("#globalSearch").value = q;
-  const [jobs, apps] = await Promise.all([api("/api/jobs"), api("/api/applications")]);
+  const [jobs, apps] = await Promise.all([api("/api/jobs?light=1"), api("/api/applications")]);
   const ql = q.toLowerCase();
   const hit = (...f) => !ql || f.join(" ").toLowerCase().includes(ql);
   const js = jobs.filter((j) => j.status !== "applied" && hit(j.company, j.title, j.location));
@@ -376,7 +390,7 @@ function pollBatch() {
   batchTimer = setTimeout(async () => {
     if (currentPage !== "queue") return;
     let o;
-    try { o = await api("/api/overview"); } catch { pollBatch(); return; }
+    try { o = await getOverview(); } catch { pollBatch(); return; }
     drawBatch(o);
     if (!o.batch.running) render.queue();
   }, 3000);
@@ -462,7 +476,7 @@ async function jobAction(b) {
   const title = card.querySelector(".card-title").textContent, company = card.querySelector(".card-sub span").textContent;
   try {
     if (act === "approve") {
-      const o = await api("/api/overview");
+      const o = await getOverview();
       const ok = await dialog({
         title: `Apply to ${title}?`, icon: "i-shield", ok: o.settings.dry_run ? "Attach resume" : "Submit",
         body: `<p style="margin:0">${esc(company)}</p><p class="muted" style="margin:8px 0 0">${o.settings.dry_run
@@ -625,9 +639,15 @@ render.applications = async () => {
     });
   };
   view.querySelectorAll("th[data-k]").forEach((th) => {
+    // Re-sort the rows already loaded (no new request, and your filter stays as typed).
     const sort = () => {
       appSort = { key: th.dataset.k, dir: appSort.key === th.dataset.k ? -appSort.dir : 1 };
-      render.applications().then(() => view.querySelector(`th[data-k="${th.dataset.k}"]`)?.focus());
+      view.querySelectorAll("th[data-k]").forEach((h) => {
+        const on = h.dataset.k === appSort.key;
+        h.setAttribute("aria-sort", on ? (appSort.dir > 0 ? "ascending" : "descending") : "none");
+        h.querySelector(".arrow").textContent = on ? (appSort.dir > 0 ? "▲" : "▼") : "";
+      });
+      draw();
     };
     th.onclick = sort;
     th.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sort(); } };
@@ -1119,12 +1139,109 @@ function focusHandshake() {
   screen.focus({ preventScroll: true });
 }
 $("#hsTopBtn")?.addEventListener("click", focusHandshake);
-document.querySelector('a[data-page="handshake"]')?.addEventListener("click", (e) => {
-  if (currentPage === "handshake") { e.preventDefault(); focusHandshake(); }
-});
 
-render.activity = async () => {
-  const rows = await api("/api/log?limit=300");
+// ---------- Search Runs + Claude Usage (Agent section) ----------
+const money = (x) => x == null ? "—" : x === 0 ? "$0.00" : x < 0.01 ? "<$0.01" : `$${x.toFixed(2)}`;
+const toks = (n) => n == null ? "—" : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n);
+const secs = (s) => s == null ? "—" : s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+const RUN_STATUS = { running: ["Running", "slot"], done: ["Done", "fitok"], error: ["Stopped", "warn"], interrupted: ["Interrupted", "demo"] };
+
+const SPEC_COLORS = { Scout: "#2f74c0", Matchmaker: "#b07f2c", Tailor: "#74509a", Scribe: "#267572", Courier: "#3f8530", Clerk: "#b83a5a" };
+const SPEC_KIND = { claude: ["Claude step", "slot"], code: ["Code", "demo"], subagent: ["Sub-agent", "fitok"] };
+
+// One run (a search or a batch of applications) as a table row; used under Specialists.
+function runRow(r) {
+  const [label, cls] = RUN_STATUS[r.status] || [r.status, ""];
+  const terms = r.queries.join(", ");
+  const funnel = r.kind === "apply"
+    ? `<b>${r.applied}</b> of ${r.attempted} applied${r.needs_you ? ` · <span class="warn-text">${r.needs_you} didn't go through</span>` : ""}`
+    : `${r.seen} found · ${r.in_area} in your area · ${r.reviewed} read → <b>${r.queued}</b> queued · ${r.skipped} skipped${r.needs_you ? ` · ${r.needs_you} need you` : ""}${r.errors ? ` · <span class="warn-text">${r.errors} error${r.errors === 1 ? "" : "s"}</span>` : ""}`;
+  return `<tr>
+    <td class="nowrap" title="${esc(toDate(r.started_at)?.toLocaleString())}">${fmtDate(r.started_at)}<div class="muted small">${fmtTime(r.started_at)}</div></td>
+    <td class="nowrap"><span class="pill ${r.kind === "apply" ? "tailored" : "branch"}">${r.kind === "apply" ? "Apply" : "Search"}</span></td>
+    <td style="max-width:420px">${r.kind === "search" ? `<div class="ellipsis" title="${esc(terms)}">${esc(terms) || '<span class="muted">—</span>'}</div>` : ""}
+      <div class="small">${funnel}</div>${r.error ? `<div class="small warn-text ellipsis" title="${esc(r.error)}">${esc(r.error)}</div>` : ""}</td>
+    <td class="nowrap">${secs(r.seconds)}</td>
+    <td class="nowrap" title="${r.claude_calls} Claude call${r.claude_calls === 1 ? "" : "s"}">${r.claude_calls ? money(r.cost) : '<span class="muted">—</span>'}</td>
+    <td class="nowrap"><span class="pill ${cls}">${r.status === "running" ? '<span class="busy" aria-hidden="true"></span> ' : ""}${label}</span></td></tr>`;
+}
+
+render.specialists = async () => {
+  const d = await api("/api/specialists?days=30");
+  const card = (sp) => {
+    const [kind, kcls] = SPEC_KIND[sp.kind] || [sp.kind, ""];
+    const ai = sp.kind !== "code";
+    return `<div class="spec">
+      <div class="spec-head"><span class="spec-badge" style="background:${SPEC_COLORS[sp.name] || "#4d6077"}" aria-hidden="true">${esc(sp.name[0])}</span>
+        <div style="min-width:0"><div class="spec-name">${esc(sp.name)}</div>
+          <div class="pill-row"><span class="pill ${kcls}">${kind}</span>${sp.effort ? `<span class="muted small" title="How hard Claude thinks on this step">${esc(sp.effort)} effort</span>` : ""}</div></div></div>
+      <p class="spec-role">${esc(sp.role)}</p>
+      <div class="spec-stats">
+        ${sp.facts.map((f) => `<div><b>${f.value}</b><span>${esc(f.label)}</span></div>`).join("")}
+        ${ai ? `<div><b>${sp.calls}</b><span>Claude calls</span></div><div><b>${money(sp.calls ? sp.cost : 0)}</b><span>Cost</span></div>
+          <div><b>${sp.avg_seconds == null ? "—" : sp.avg_seconds + "s"}</b><span>Avg time</span></div>` : ""}
+      </div>
+      <div class="spec-foot muted small"><span>${sp.last_active ? `Last active ${ago(sp.last_active)}` : "Not active yet"}</span><code title="Where it lives in the code">${esc(sp.code)}</code></div>
+    </div>`;
+  };
+  const runs = d.runs;
+  view.dataset.live = runs.some((r) => r.status === "running") ? "1" : "";
+  const html = `<h1>Specialists</h1>
+    <p class="subtitle">Job Agent's six specialists and what each did in the last ${d.days} days. Claude steps make one Claude request per job; Courier is plain code. Costs are estimates (<a href="#/usage">details</a>).</p>
+    <div class="spec-grid">${d.specialists.map(card).join("")}</div>
+    <div class="panel mt"><div class="panel-head"><svg class="icon" aria-hidden="true"><use href="#i-runs"/></svg>Recent runs${runs.length ? `<span class="right muted small">last ${runs.length}</span>` : ""}</div>
+      ${runs.length ? `<div class="panel-body flush"><div class="table-wrap" style="border:0"><table class="listview"><thead><tr><th>Started</th><th>Type</th><th>Search terms and results</th><th>Took</th><th>Claude</th><th>Status</th></tr></thead>
+        <tbody>${runs.map(runRow).join("")}</tbody></table></div></div>`
+      : `<div class="panel-body"><div class="empty" style="padding:24px 10px"><div class="big">No runs recorded yet</div>Each search and each batch of applications shows up here. Click <b>Run search now</b> to start one.</div></div>`}</div>`;
+  if (view._runs !== html) { view.innerHTML = html; view._runs = html; }
+};
+
+render.usage = async () => {
+  const u = await api("/api/usage?days=30");
+  const p = u.period, max = Math.max(...u.daily.map((d) => d.cost), 0.0001);
+  const share = (c) => p.cost ? Math.round((c / p.cost) * 100) : 0;
+  const table = (rows, first) => rows.length ? `<div class="table-wrap" style="border:0"><table class="listview"><thead><tr><th>${first}</th><th>Calls</th><th>Tokens in</th><th>Tokens out</th><th title="Share of the prompt read from Claude's cache (cheaper)">From cache</th><th>Avg time</th><th>Cost</th><th style="width:150px">Share</th></tr></thead><tbody>
+      ${rows.map((r) => `<tr><td><b>${esc(r.name)}</b></td><td>${r.calls}</td><td>${toks(r.input + r.cache_read + r.cache_write)}</td><td>${toks(r.output)}</td>
+        <td>${r.cache_share == null ? "—" : r.cache_share + "%"}</td><td>${r.avg_seconds == null ? "—" : r.avg_seconds + "s"}</td><td class="nowrap">${money(r.cost)}</td>
+        <td><div class="meter-row"><div class="meter"><i style="width:${share(r.cost)}%"></i></div><b>${share(r.cost)}%</b></div></td></tr>`).join("")}</tbody></table></div>`
+    : `<div class="empty" style="padding:20px 10px">No Claude calls in the last ${u.days} days.</div>`;
+  view.innerHTML = `<h1>Claude Usage</h1>
+    <p class="subtitle">What the agent spends on Claude: which steps use the most, and whether the resume cache is working. Costs are estimates from list prices; your Anthropic bill is the final word.</p>
+    <div class="gadgets">
+      <div class="gadget g-blue"><div class="label">Today</div><div class="value" style="font-size:28px">${money(u.today.cost)}</div><div class="hint">${u.today.calls} call${u.today.calls === 1 ? "" : "s"}</div></div>
+      <div class="gadget g-teal"><div class="label">Last 7 days</div><div class="value" style="font-size:28px">${money(u.week.cost)}</div><div class="hint">${u.week.calls} calls</div></div>
+      <div class="gadget g-green"><div class="label">Last 30 days</div><div class="value" style="font-size:28px">${money(p.cost)}</div><div class="hint">${money(u.all_time.cost)} since tracking began</div></div>
+      <div class="gadget g-amber"><div class="label">Read from cache</div><div class="value">${p.cache_share == null ? "—" : p.cache_share + "%"}</div><div class="hint">of prompt tokens (higher is cheaper)</div></div>
+    </div>
+    <div class="grid2 mt">
+      <div class="panel"><div class="panel-head"><svg class="icon" aria-hidden="true"><use href="#i-usage"/></svg>Daily cost, last 14 days</div><div class="panel-body">
+        <div class="bars" role="img" aria-label="${esc(u.daily.map((d) => `${d.day}: ${money(d.cost)}`).join(", "))}">
+          ${u.daily.map((d) => `<div class="bar" title="${esc(new Date(d.day + "T12:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }))}: ${money(d.cost)}"><i style="height:${d.cost ? Math.max(3, (d.cost / max) * 100) : 0}%"></i><span>${new Date(d.day + "T12:00").getDate()}</span></div>`).join("")}
+        </div></div></div>
+      <div class="panel"><div class="panel-head"><svg class="icon" aria-hidden="true"><use href="#i-star"/></svg>Cost per result (last ${u.days} days)</div><div class="panel-body">
+        <div class="kv"><span>Per posting reviewed</span><b>${money(u.per_posting)}</b></div>
+        <div class="kv"><span>Per job that made the queue</span><b>${money(u.per_queued)}</b></div>
+        <div class="kv"><span>Average Claude call</span><b>${p.calls ? money(p.cost / p.calls) : "—"}</b></div>
+        <div class="kv"><span>Average wait per call</span><b>${p.avg_seconds == null ? "—" : p.avg_seconds + "s"}</b></div>
+        <p class="muted small" style="margin:8px 0 0">Search costs only. Tailoring, cover letters and Gmail checks outside a search are counted in the tables below.</p>
+      </div></div>
+    </div>
+    <div class="panel mt"><div class="panel-head"><svg class="icon" aria-hidden="true"><use href="#i-team"/></svg>By specialist</div><div class="panel-body flush">${table(u.by_purpose, "Specialist")}</div></div>
+    <div class="panel mt"><div class="panel-head"><svg class="icon" aria-hidden="true"><use href="#i-code"/></svg>By model</div><div class="panel-body flush">${table(u.by_model, "Model")}</div></div>
+    ${u.all_time.calls ? "" : `<div class="note mt">Usage is recorded from now on, so this page fills in as the agent searches, tailors and writes cover letters.</div>`}`;
+};
+
+// The log is fetched in full when you open the page; the auto-refresh asks only for newer events.
+const actLog = { rows: [] };
+render.activity = async (poll = false) => {
+  if (poll && actLog.rows.length) {
+    const fresh = await api(`/api/log?after=${actLog.rows[0].id}&limit=300`);
+    if (currentPage !== "activity") return;
+    actLog.rows = [...fresh, ...actLog.rows].slice(0, 300);
+  } else {
+    actLog.rows = await api("/api/log?limit=300");
+  }
+  const rows = actLog.rows;
   const html = `<h1>Activity Log</h1><p class="subtitle">Everything the agent has done, newest first. Refreshes automatically.</p>
     <div class="panel"><div class="panel-head"><svg class="icon" aria-hidden="true"><use href="#i-pulse"/></svg>Recent events${rows.length ? `<span class="right muted small">${rows.length} shown</span>` : ""}</div>
     <div class="panel-body" style="padding:4px 12px">${feed(rows)}</div></div>`;
@@ -1225,8 +1342,8 @@ async function route() {
   currentPage = PAGES[page] ? page : "overview";
   setCrumbs(currentPage);
   if (currentPage !== "search") $("#globalSearch").value = "";
-  document.title = `${PAGES[currentPage]} – Job Agent`;
-  view._activity = view._overview = null;
+  document.title = `${PAGES[currentPage]} – Offer Ledger`;
+  view._activity = view._overview = view._runs = null; view.dataset.live = "";
   view.setAttribute("aria-busy", "true");
   // show a spinner only if the page takes a moment, so quick loads don't flicker
   const slow = setTimeout(() => { if (seq === routeSeq) view.innerHTML = `<div class="loading"><span class="busy lg" aria-hidden="true"></span>Loading ${esc(PAGES[currentPage])}…</div>`; }, 200);
@@ -1241,10 +1358,14 @@ async function route() {
 window.addEventListener("hashchange", route);
 route();
 clearInterval(pollTimer);
-pollTimer = setInterval(() => {
+function tick() {
+  if (document.hidden) return;  // nothing to show while the tab is in the background
   // Overview redraws itself (it refreshes the top bar too); skip it while one of its buttons is working.
   if (currentPage === "overview") { if (!view.querySelector('[aria-busy="true"]')) render.overview().catch(() => {}); }
   else refreshChrome();
   if (currentPage !== "handshake") api("/api/live/status").then((s) => { live.st = s; liveChrome(s); }).catch(() => {});
-  if (currentPage === "activity") render.activity().catch(() => {});
-}, 6000);
+  if (currentPage === "activity") render.activity(true).catch(() => {});
+  if (currentPage === "specialists" && view.dataset.live === "1") render.specialists().catch(() => {});  // a run is in progress
+}
+pollTimer = setInterval(tick, 6000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });  // catch up on return

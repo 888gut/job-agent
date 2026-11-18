@@ -1,4 +1,4 @@
-# Start / stop / restart the Job Agent server as a hidden background process.
+# Start / stop / restart the Offer Ledger server as a hidden background process.
 # Usage: server.ps1 start | stop | restart | status | open
 #   open = what the desktop icon runs: make sure the server is running the latest code
 #          (restart it if any code changed since it started), then show the dashboard in Chrome.
@@ -15,7 +15,7 @@ function Get-Server {
         $p = Get-Process -Id $id -ErrorAction SilentlyContinue
         if ($p) { return $p }
     }
-    # also catch a Job Agent server started some other way on port 8765 (only ours, never another program)
+    # also catch an Offer Ledger server started some other way on port 8765 (only ours, never another program)
     $owner = Get-PortOwner
     if ($owner -and $owner.CommandLine -match "uvicorn.+app\.main:app") { return Get-Process -Id $owner.ProcessId -ErrorAction SilentlyContinue }
     return $null
@@ -29,15 +29,15 @@ function Get-PortOwner {
 
 function Stop-Server {
     $p = Get-Server
-    if ($p) { Stop-Process -Id $p.Id -Force; Start-Sleep -Seconds 1; "Stopped the Job Agent server." }
-    else { "The Job Agent server isn't running." }
+    if ($p) { Stop-Process -Id $p.Id -Force; Start-Sleep -Seconds 1; "Stopped the Offer Ledger server." }
+    else { "The Offer Ledger server isn't running." }
     Remove-Item $pidFile -ErrorAction SilentlyContinue
 }
 
 function Start-Server {
-    if (Get-Server) { "The Job Agent server is already running at http://127.0.0.1:8765"; return }
+    if (Get-Server) { "The Offer Ledger server is already running at http://127.0.0.1:8765"; return }
     $other = Get-PortOwner
-    if ($other) { "Port 8765 is in use by another program (process $($other.ProcessId): $($other.CommandLine)). Close it, then start the Job Agent again."; return }
+    if ($other) { "Port 8765 is in use by another program (process $($other.ProcessId): $($other.CommandLine)). Close it, then start Offer Ledger again."; return }
     New-Item -ItemType Directory -Force (Split-Path $log) | Out-Null
     $p = Start-Process -FilePath $python -WorkingDirectory $root -WindowStyle Hidden -PassThru `
         -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8765" `
@@ -45,7 +45,7 @@ function Start-Server {
     $p.Id | Set-Content $pidFile
     for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Milliseconds 500
-        try { Invoke-WebRequest "http://127.0.0.1:8765/api/settings" -UseBasicParsing -TimeoutSec 2 | Out-Null; "Job Agent is running at http://127.0.0.1:8765"; return } catch {}
+        try { Invoke-WebRequest "http://127.0.0.1:8765/api/settings" -UseBasicParsing -TimeoutSec 2 | Out-Null; "Offer Ledger is running at http://127.0.0.1:8765"; return } catch {}
     }
     "The server didn't answer yet. Check $log.err"
 }
