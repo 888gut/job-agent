@@ -58,6 +58,9 @@ async def lifespan(_app: FastAPI):
     scheduler.start()
     _reschedule()
     scheduler.add_job(_gmail_tick, "interval", minutes=30, id="gmail", coalesce=True)
+    # Weekly: each branch resume goes through Handshake's resume optimizer (each one at most every 7 days)
+    scheduler.add_job(pipeline.optimize_branches, "interval", hours=24, id="hs_optimize", coalesce=True,
+                      next_run_time=datetime.now() + timedelta(minutes=20))
     scheduler.add_job(pipeline.cleanup_handshake_docs, "interval", hours=24, id="hs_docs", coalesce=True,
                       next_run_time=datetime.now() + timedelta(minutes=10))
     # Keep the agent's Handshake browser running out of sight for the dashboard's Handshake tab,
@@ -124,6 +127,8 @@ def tailored_out(tr: TailoredResume | None, job_id: int | None = None) -> dict |
         "added": json.loads(tr.added_json) if tr.added_json else None,
         "created_at": tr.created_at.isoformat(), "has_pdf": bool(tr.pdf_path and Path(tr.pdf_path).exists()),
         "made_for": f"{made_for.title} at {made_for.company}" if made_for else "",
+        "hs_optimized_at": tr.hs_optimized_at.isoformat() if tr.hs_optimized_at else None,
+        "superseded": tr.superseded_by is not None,
         "reused": job_id is not None and tr.created_for_job_id != job_id,
     }
 
@@ -155,6 +160,7 @@ def overview():
     return {
         "gmail_email": st.get("gmail_email"),
         "gmail_checked_at": st.get("gmail_checked_at"),
+        "sheet_url": google_store.sheet_url(),
         "interview_alerts": [{
             "id": a.id, "company": jobs[a.job_id].company, "title": jobs[a.job_id].title,
             "status": a.status, "note": a.email_note, "link": a.email_link,
@@ -373,6 +379,12 @@ def set_app_status(app_id: int, status: str = Form(...)):
 
 
 # ---------------- resumes ----------------
+@app.post("/api/branches/optimize")
+async def optimize_branches_now():
+    """Run every branch resume through Handshake's resume optimizer now."""
+    return await asyncio.get_running_loop().run_in_executor(None, pipeline.optimize_branches, True)
+
+
 @app.get("/api/resumes")
 def resumes():
     cur = pipeline.current_resumes()

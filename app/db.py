@@ -70,6 +70,9 @@ class TailoredResume(SQLModel, table=True):
     uses: int = 0
     is_demo: bool = False
     created_at: datetime = Field(default_factory=now)
+    hs_optimized_at: Optional[datetime] = None  # last run through Handshake's resume optimizer
+    full_text: str = ""                      # whole resume text when the Doc no longer matches edits_json
+    superseded_by: Optional[int] = None      # a newer version of this branch replaced it
 
 
 class HandshakeDoc(SQLModel, table=True):

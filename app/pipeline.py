@@ -138,6 +138,125 @@ def cleanup_handshake_docs() -> dict:
     return {"deleted": deleted, "candidates": len(old)}
 
 
+# ---------------- Handshake resume optimizer ----------------
+OPTIMIZE_EVERY_DAYS = 7
+
+
+def branch_heads() -> list[TailoredResume]:
+    """The current version of each branch resume (older versions were replaced)."""
+    cur = {r.id for r in current_resumes().values()}
+    with session() as s:
+        rows = s.exec(select(TailoredResume).where(TailoredResume.is_demo == False,  # noqa: E712
+                                                   TailoredResume.superseded_by == None)).all()  # noqa: E711
+    return [t for t in rows if t.resume_id in cur and t.doc_id]
+
+
+def _was_sent(tr: TailoredResume) -> bool:
+    with session() as s:
+        return tr.uses > 0 or bool(tr.doc_url and s.exec(select(Application).where(
+            Application.drive_url == tr.doc_url, Application.is_demo == False)).first())  # noqa: E712
+
+
+def _naive(dt: datetime) -> datetime:
+    return dt.replace(tzinfo=None) if dt.tzinfo else dt
+
+
+def optimize_branches(force: bool = False) -> dict:
+    """Run every branch resume through Handshake's resume optimizer and take its draft as the
+    branch's Google Doc. A branch resume already sent with an application is kept as the record
+    of what was sent, and the draft becomes the branch's new version; otherwise the old Doc is
+    replaced. Base resumes are never touched. Runs weekly; force=True ignores the 7-day wait."""
+    from datetime import timedelta
+
+    if batch["running"] or state["running"]:
+        return {"ok": False, "message": "The agent is busy; try again when it's idle.", "done": []}
+    if not google_store.is_connected("storage"):
+        return {"ok": False, "message": "Connect the storage Google account first.", "done": []}
+    cutoff = _naive(now()) - timedelta(days=OPTIMIZE_EVERY_DAYS)
+    done, failed = [], []
+    for tr in branch_heads():
+        if batch["running"] or state["running"]:
+            break
+        if not force and tr.hs_optimized_at and _naive(tr.hs_optimized_at) > cutoff:
+            continue
+        try:
+            done.append(_optimize_one(tr))
+        except Exception as e:
+            failed.append(tr.branch)
+            log(f"Couldn't run the '{tr.branch}' resume through Handshake's optimizer: {e}", "warn")
+            if _needs_user(e):
+                break
+    msg = (f"Handshake's optimizer improved {len(done)} branch resume(s)." if done else "No branch resumes were due.")
+    if failed:
+        msg += f" {len(failed)} couldn't be done: {', '.join(failed)}."
+    return {"ok": not failed, "message": msg, "done": done}
+
+
+def _newest_untracked_upload(name: str) -> str:
+    """The id of the newest Handshake document named like our upload (e.g. 'X_Resume.pdf (27)')
+    that the agent isn't tracking yet."""
+    stem = name.rsplit(".", 1)[0]
+    try:
+        docs = _hs(handshake.list_docs, timeout=180)
+    except Exception:
+        return ""
+    with session() as s:
+        tracked = {d.doc_id for d in s.exec(select(HandshakeDoc))}
+    mine = [d for d in docs if d["id"] not in tracked and d["name"].startswith(stem)]
+    return max(mine, key=lambda d: int(d["id"]))["id"] if mine else ""
+
+
+def _optimize_one(tr: TailoredResume) -> dict:
+    tr = build_doc(tr.id)  # fresh PDF of the Doc, including your own edits in it
+    pdf = Path(tr.pdf_path)
+    with session() as s:
+        job = s.get(Job, tr.created_for_job_id) if tr.created_for_job_id else None
+    name = upload_name_for(job or Job(handshake_id="", url="", title="", resume_slot=tr.slot))
+    known = known_doc(pdf)
+    out = _hs(handshake.optimize_resume, TAILORED / f"opt_{tr.id}", known, pdf, name, timeout=420)
+    if not known:  # uploaded for the optimizer: track it so the weekly cleanup covers it
+        new_id = out.get("doc_id") or _newest_untracked_upload(name)
+        if new_id:
+            note_doc_use(new_id, pdf, name, sent=False)
+    with pymupdf.open(str(out["pdf"])) as doc:
+        text = "\n".join(page.get_text() for page in doc).strip()
+    if len(text) < 200:
+        raise RuntimeError("Handshake's draft came back empty.")
+    with session() as s:
+        r = s.get(Resume, tr.resume_id)
+    doc_name = f"Resume {r.slot} - {tr.branch} (Handshake-optimized {now():%b %d})"
+    new_doc = google_store.upload_as_doc(out["docx"], doc_name)
+    sent = _was_sent(tr)
+    old_doc = None
+    with session() as s:
+        if sent:  # keep the sent version as the record; the draft becomes the branch's new version
+            row = TailoredResume(resume_id=tr.resume_id, slot=tr.slot, branch=tr.branch,
+                                 edits_json=tr.edits_json, added_json=tr.added_json)
+            s.add(row)
+            s.commit()
+            s.refresh(row)
+            old = s.get(TailoredResume, tr.id)
+            old.superseded_by = row.id
+            s.add(old)
+        else:
+            row = s.get(TailoredResume, tr.id)
+            old_doc = row.doc_id
+        row.doc_id, row.doc_url = new_doc, google_store.doc_url(new_doc)
+        row.full_text, row.hs_optimized_at = text, now()
+        s.add(row)
+        s.commit()
+        s.refresh(row)
+    if old_doc:
+        try:
+            google_store.trash_file(old_doc)  # in Drive's trash, restorable for 30 days
+        except Exception as e:
+            log(f"Couldn't move the old '{tr.branch}' Doc to Drive's trash: {e}", "warn")
+    build_doc(row.id)
+    how = "saved as a new version (the old one was sent with an application)" if sent else "replaced the old Doc"
+    log(f"Handshake's optimizer improved the '{tr.branch}' resume: {how}.", "success")
+    return {"branch": tr.branch, "id": row.id, "new_version": sent, "doc_url": row.doc_url}
+
+
 def record_handshake_login(ok: bool) -> None:
     """Remember the last confirmed Handshake sign-in, so the dashboard can show it without a check."""
     save_settings({"hs_logged_in": bool(ok), "hs_checked_at": now().isoformat()})
@@ -182,6 +301,7 @@ def find_branch_resume(resume_id: int, branch: str) -> TailoredResume | None:
     with session() as s:
         return s.exec(select(TailoredResume).where(
             TailoredResume.resume_id == resume_id, TailoredResume.branch == branch,
+            TailoredResume.superseded_by == None,  # noqa: E711
             TailoredResume.is_demo == False).order_by(TailoredResume.created_at.desc())).first()  # noqa: E712
 
 
@@ -216,12 +336,13 @@ def tailored_candidates(include_ids=(), limit: int = MAX_CANDIDATES,
         rows = s.exec(select(TailoredResume).where(TailoredResume.resume_id.in_(list(cur) or [0]))
                       .where(TailoredResume.is_demo == False)).all()  # noqa: E712
     zero = {"sent": 0, "interviews": 0}
+    rows = [t for t in rows if t.superseded_by is None]  # a replaced version isn't sent again
     rows.sort(key=lambda t: (records.get(t.id, zero)["interviews"], t.uses, t.created_at), reverse=True)
     keep = rows[:limit] + [t for t in rows[limit:] if t.id in set(include_ids)]
     return [{"key": f"T{t.id}", "id": t.id, "slot": cur[t.resume_id], "branch": t.branch,
              "edits": [{"old": e["old"], "new": e["new"]} for e in json.loads(t.edits_json)],
              "added": json.loads(t.added_json) if t.added_json else None,
-             "record": records.get(t.id)} for t in keep]
+             "text": t.full_text, "record": records.get(t.id)} for t in keep]
 
 
 def _needs_fresh(job: Job, settings: dict) -> bool:

@@ -145,8 +145,6 @@ a:hover { text-decoration: underline; }
 }
 .caption button:first-child { border-left: 0; }
 .caption button:hover { background: var(--caption-hover); }
-.caption button.close { width: 44px; color: #fff; font-weight: 700; background: var(--close-bg); }
-.caption button.close:hover { background: var(--close-hover); box-shadow: none; }
 
 /* ---------------- Address bar ---------------- */
 .addressbar { display: flex; align-items: center; gap: 8px; padding: 2px 2px 6px; }
@@ -734,7 +732,6 @@ a.btn, a.btn:hover { text-decoration: none; }
   .window { padding: 0; border: 0; border-radius: 0; box-shadow: none; }
   .window::before { display: none; }
   .titlebar { padding-left: 10px; }
-  .caption .close { display: none; }
   .addressbar { display: none; }
   .client { border-width: 1px 0 0; border-radius: 0; box-shadow: none; }
 

@@ -2,7 +2,7 @@
 const $ = (s, el = document) => el.querySelector(s);
 const view = $("#view");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const PAGES = { overview: "Overview", queue: "Approval Queue", applications: "Applications", resumes: "Resumes & Transcript", facts: "Career Facts", github: "GitHub", handshake: "Handshake", settings: "Settings", activity: "Activity Log" };
+const PAGES = { overview: "Overview", queue: "Approval Queue", applications: "Applications", resumes: "Resumes & Transcript", facts: "Career Facts", github: "GitHub", handshake: "Handshake", settings: "Settings", activity: "Activity Log", search: "Search results" };
 let currentPage = "overview";
 let pollTimer = null;
 
@@ -22,7 +22,6 @@ let savedTheme = "light";
 try { savedTheme = localStorage.getItem("theme") === "dark" ? "dark" : "light"; } catch {}
 applyTheme(savedTheme);
 const toggleTheme = () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
-$("#themeBtn").onclick = toggleTheme;
 $("#themeToggle").onclick = toggleTheme;
 $("#refreshBtn").onclick = () => route();
 
@@ -135,6 +134,9 @@ async function refreshChrome() {
     const gb = $("#gmailBadge"), n = o.interview_alerts.length;
     gb.hidden = !n; gb.textContent = n;
     $("#gmailBtn").onclick = () => window.open(gmailUrl(o.gmail_email), "_blank", "noopener");
+    const sb = $("#sheetBtn");
+    sb.style.display = o.sheet_url ? "" : "none";
+    sb.onclick = o.sheet_url ? () => window.open(o.sheet_url, "_blank", "noopener") : null;
     $("#gmailBtn").title = o.gmail_email ? `Open ${o.gmail_email} in a new tab` : "Open Gmail (connect your Handshake Gmail in Settings to open that account directly)";
     const r = o.run;
     $("#runStatus").innerHTML = r.running ? `<span class="busy"></span> ${esc(r.stage)}`
@@ -159,7 +161,11 @@ $("#clearDemo").onclick = async (e) => {
   }
 };
 $("#globalSearch").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { sessionStorage.setItem("appFilter", e.target.value); location.hash = "#/applications"; route(); }
+  if (e.key !== "Enter") return;
+  const q = e.target.value.trim();
+  if (!q) return;
+  const h = `#/search?q=${encodeURIComponent(q)}`;
+  if (location.hash === h) route(); else location.hash = h;
 });
 
 // ---------- pages ----------
@@ -167,12 +173,13 @@ const render = {};
 
 render.overview = async () => {
   const o = await refreshChrome();
-  if (!o) { view.innerHTML = `<div class="empty"><div class="big">Can't reach the agent server</div>Make sure the Job Agent is running, then click Refresh (&#8635;) in the title bar.</div>`; return; }
+  if (!o) { view._overview = null; view.innerHTML = `<div class="empty"><div class="big">Can't reach the agent server</div>Make sure the Job Agent is running, then click Refresh (&#8635;) in the title bar.</div>`; return; }
   const p = o.pipeline, total = Object.values(p).reduce((a, b) => a + b, 0) || 1;
   const seg = [["applied", "#3cb31a", "Applied"], ["queued", "#2f86d6", "Awaiting approval"], ["needs_manual", "#e0a316", "Needs you"], ["skipped", "#a3aeb9", "Skipped (low match)"]];
   const log = await api("/api/log?limit=8");
   const s = o.app_status;
-  view.innerHTML = `
+  if (currentPage !== "overview") return;  // you moved on while this was loading
+  const html = `
     <h1>Good ${new Date().getHours() < 12 ? "morning" : new Date().getHours() < 18 ? "afternoon" : "evening"}</h1>
     <p class="subtitle">Here's where your job search stands.</p>
     ${o.interview_alerts.length ? `<div class="interview-alert" role="status">
@@ -210,6 +217,11 @@ render.overview = async () => {
         </div></div>
       </div>
     </div>`;
+  // Auto-refresh redraws only when something changed, and keeps keyboard focus where it was.
+  if (view._overview === html) return;
+  const focusId = view.contains(document.activeElement) ? document.activeElement.id : "";
+  view.innerHTML = html; view._overview = html;
+  if (focusId) $("#" + focusId)?.focus({ preventScroll: true });
   $("#ovGmail").onclick = (e) => checkGmail(e.currentTarget);
   $("#ovRun").onclick = async (e) => { await withBusy(e.currentTarget, "Starting…", async () => { const r = await post("/api/run"); toast(r.message, r.ok); }); setTimeout(route, 800); };
 };
@@ -275,6 +287,50 @@ render.queue = async () => {
     }));
     drawBatch(o);
   }
+  // Coming from Search results: open that job's card and scroll to it (after route() resets the scroll).
+  const focusId = sessionStorage.getItem("queueFocus");
+  if (focusId) {
+    sessionStorage.removeItem("queueFocus");
+    const card = wrap.querySelector(`.card[data-id="${CSS.escape(focusId)}"]`);
+    if (card) setTimeout(() => {
+      const head = card.querySelector(".card-head");
+      card.classList.add("open"); head.setAttribute("aria-expanded", "true");
+      card.scrollIntoView({ block: "start" }); head.focus({ preventScroll: true });
+    }, 0);
+  }
+};
+
+// ---------- search (top search box) ----------
+const JOB_STATUS = { queued: ["Awaiting approval", "slot"], needs_manual: ["Needs you", "warn"], skipped: ["Skipped", ""], new: ["New", ""], failed: ["Couldn't apply", "warn"], dismissed: ["Dismissed", ""] };
+render.search = async () => {
+  let q = "";
+  try { q = decodeURIComponent(location.hash.split("?q=")[1] || "").trim(); } catch {}
+  $("#globalSearch").value = q;
+  const [jobs, apps] = await Promise.all([api("/api/jobs"), api("/api/applications")]);
+  const ql = q.toLowerCase();
+  const hit = (...f) => !ql || f.join(" ").toLowerCase().includes(ql);
+  const js = jobs.filter((j) => j.status !== "applied" && hit(j.company, j.title, j.location));
+  const as = apps.items.filter((a) => hit(a.company, a.title, a.location));
+  const sub = (x) => [x.company, x.location].filter(Boolean).map(esc).join(" · ");
+  const jobRow = (j) => {
+    const [label, cls] = JOB_STATUS[j.status] || [j.status, ""];
+    const inQueue = j.status === "queued" || j.status === "needs_manual";
+    return `<tr><td><div class="cell-title" title="${esc(j.title)}">${esc(j.title)}</div><div class="cell-sub">${sub(j)}${j.is_demo ? ' <span class="pill demo">Sample</span>' : ""}</div></td>
+      <td class="nowrap"><span class="pill ${cls}">${esc(label)}</span></td><td style="width:150px">${meter(j.score)}</td>
+      <td class="nowrap">${inQueue ? `<a href="#/queue" data-focus="${j.id}">Open in queue</a>` : j.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">View posting</a>` : ""}</td></tr>`;
+  };
+  const appRow = (a) => `<tr><td><div class="cell-title" title="${esc(a.title)}">${esc(a.title)}</div><div class="cell-sub">${sub(a)}${a.is_demo ? ' <span class="pill demo">Sample</span>' : ""}</div></td>
+      <td class="nowrap" title="${esc(toDate(a.applied_at)?.toLocaleString())}">Applied ${fmtDate(a.applied_at)}</td><td class="nowrap"><span class="pill ${esc(a.status)}">${esc(a.status)}</span></td>
+      <td class="nowrap"><a href="#/applications" data-app-filter="${esc(a.company)}">Show in Applications</a></td></tr>`;
+  const section = (title, icon, rows, render1, none) => `<div class="panel mt"><div class="panel-head"><svg class="icon" aria-hidden="true"><use href="#${icon}"/></svg>${title}<span class="right muted small">${rows.length}</span></div>
+    ${rows.length ? `<div class="panel-body flush"><div class="table-wrap"><table class="listview"><tbody>${rows.map(render1).join("")}</tbody></table></div></div>`
+      : `<div class="panel-body muted">${none}</div>`}</div>`;
+  view.innerHTML = `<h1>Search results</h1>
+    <p class="subtitle">${q ? `Jobs and applications matching <b>${esc(q)}</b> by company, role or location.` : "Type in the search box above and press Enter."}</p>
+    ${section("Jobs the agent found", "i-queue", js, jobRow, "No jobs match.")}
+    ${section("Applications", "i-list", as, appRow, "No applications match.")}`;
+  view.querySelectorAll("[data-focus]").forEach((a) => a.addEventListener("click", () => sessionStorage.setItem("queueFocus", a.dataset.focus)));
+  view.querySelectorAll("[data-app-filter]").forEach((a) => a.addEventListener("click", () => sessionStorage.setItem("appFilter", a.dataset.appFilter)));
 };
 
 function drawBatch(o) {
@@ -463,7 +519,6 @@ render.applications = async () => {
     th.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sort(); } };
   });
   $("#appQ").oninput = draw; $("#appS").onchange = draw; draw();
-  if (data.sheet_url) { $("#sheetBtn").style.display = ""; $("#sheetBtn").onclick = () => window.open(data.sheet_url); }
 };
 
 // Make a <label class="drop"> work with drag-and-drop, click and the keyboard.
@@ -499,12 +554,20 @@ render.resumes = async () => {
     <div id="fmtCheck"></div>
     <div id="transcriptPanel"><div class="panel mt"><div class="panel-head">Transcript</div><div class="panel-body"><div class="loading" style="padding:20px"><span class="busy"></span> Loading…</div></div></div></div>
     <h2>Tailored resumes by branch</h2>
-    <p class="muted" style="margin-top:-4px">A new tailored copy is made only when no stored resume scores high enough. Copies that led to interviews are compared first for new jobs.</p>
+    <p class="muted" style="margin-top:-4px">A new tailored copy is made only when no stored resume scores high enough. Copies that led to interviews are compared first for new jobs. Once a week each branch resume also goes through Handshake's resume optimizer, and its draft becomes the branch's Google Doc (a copy already sent with an application is kept as the record).</p>
+    ${d.tailored.length ? `<div class="btn-row" style="margin:-2px 0 10px"><button class="btn small" id="hsOptimize">Improve with Handshake now</button><span class="muted small" id="hsOptMsg" aria-live="polite"></span></div>` : ""}
     ${d.tailored.length ? `<div class="table-wrap"><table class="listview mid-table"><thead><tr><th>Branch</th><th>Based on</th><th>First made for</th><th>Edits</th><th>Used</th><th>Files</th></tr></thead><tbody>
       ${d.tailored.map((t) => `<tr><td><span class="pill branch" title="${esc(t.branch)}">${esc(t.branch)}</span></td><td class="nowrap"><span class="pill slot">Resume ${esc(t.slot)}</span></td>
-      <td>${esc(t.made_for)}</td><td>${t.edits.length}</td><td class="nowrap">${t.uses}×</td>
+      <td>${esc(t.made_for)}${t.superseded ? ' <span class="muted small">(older version, kept as sent)</span>' : ""}</td><td>${t.hs_optimized_at ? `<span title="Rewritten by Handshake's optimizer ${esc(new Date(t.hs_optimized_at).toLocaleDateString())}">Handshake</span>` : t.edits.length}</td><td class="nowrap">${t.uses}×</td>
       <td class="nowrap">${t.doc_url ? `<a href="${esc(t.doc_url)}" target="_blank" rel="noopener">Google Doc</a>` : '<span class="muted">Doc pending</span>'}${t.has_pdf ? ` · <a href="/api/tailored/${t.id}/pdf" target="_blank" rel="noopener">PDF</a>` : ""}</td></tr>`).join("")}</tbody></table></div>`
       : `<div class="empty" style="border:1px dashed var(--line);border-radius:4px;padding:24px 10px"><div class="big">No tailored resumes yet</div>They'll appear here once the agent creates them.</div>`}`;
+  const opt = $("#hsOptimize");
+  if (opt) opt.onclick = () => withBusy(opt, "Working… (about a minute per resume)", async () => {
+    const r = await post("/api/branches/optimize");
+    toast(r.message, r.ok);
+    if (r.done?.length) await render.resumes();
+    else $("#hsOptMsg").textContent = r.message;
+  });
   view.querySelectorAll("[data-master]").forEach((b) => b.onclick = async () => {
     busy(b, true, "Creating…");
     try {
@@ -1043,8 +1106,9 @@ async function route() {
   const page = (location.hash.match(/#\/(\w+)/) || [])[1];
   currentPage = PAGES[page] ? page : "overview";
   setCrumbs(currentPage);
+  if (currentPage !== "search") $("#globalSearch").value = "";
   document.title = `${PAGES[currentPage]} – Job Agent`;
-  view._activity = null;
+  view._activity = view._overview = null;
   view.setAttribute("aria-busy", "true");
   // show a spinner only if the page takes a moment, so quick loads don't flicker
   const slow = setTimeout(() => { if (seq === routeSeq) view.innerHTML = `<div class="loading"><span class="busy lg" aria-hidden="true"></span>Loading ${esc(PAGES[currentPage])}…</div>`; }, 200);
@@ -1060,7 +1124,9 @@ window.addEventListener("hashchange", route);
 route();
 clearInterval(pollTimer);
 pollTimer = setInterval(() => {
-  refreshChrome();
+  // Overview redraws itself (it refreshes the top bar too); skip it while one of its buttons is working.
+  if (currentPage === "overview") { if (!view.querySelector('[aria-busy="true"]')) render.overview().catch(() => {}); }
+  else refreshChrome();
   if (currentPage !== "handshake") api("/api/live/status").then((s) => { live.st = s; liveChrome(s); }).catch(() => {});
   if (currentPage === "activity") render.activity().catch(() => {});
 }, 6000);

@@ -26,7 +26,8 @@ DEBUG_PORT = 9333
 VIEW_FLAGS = [f"--remote-debugging-port={DEBUG_PORT}", "--remote-debugging-address=127.0.0.1",
               "--window-position=-32000,-32000", "--window-size=1280,900",
               "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
-              "--disable-background-timer-throttling", "--disable-features=CalculateNativeWinOcclusion"]
+              "--disable-background-timer-throttling", "--disable-features=CalculateNativeWinOcclusion",
+              "--hide-crash-restore-bubble"]  # no "Restore pages?" pop-up after a forced close
 # keep: the dashboard wants the agent's browser running in the background. The keeper thread
 # (start_keeper) reopens it if it closes by itself, and stops when you close it from the dashboard.
 _state: dict = {"pw": None, "ctx": None, "keep": True}
@@ -220,13 +221,26 @@ WS_EX_TOOLWINDOW, WS_EX_APPWINDOW = 0x80, 0x40000
 
 
 def _forget_window_position() -> None:
-    """Drop Chrome's saved window placement for the agent profile (it's off-screen)."""
+    """Drop Chrome's saved window placement for the agent profile (it's off-screen), and turn off
+    the downloads panel that pops up after each download: with the window off-screen, Chrome
+    pushes that panel into the top-left corner of your screen. Also mark the last exit as clean,
+    since the agent's Chrome is often force-closed and would otherwise put a "Restore pages?"
+    pop-up in that same corner."""
     import json
 
     prefs = BROWSER_PROFILE / "Default" / "Preferences"
     try:
         data = json.loads(prefs.read_text(encoding="utf-8"))
-        if data.get("browser", {}).pop("window_placement", None) is not None:
+        changed = data.get("browser", {}).pop("window_placement", None) is not None
+        bubble = data.setdefault("download_bubble", {})
+        if bubble.get("partial_view_enabled") is not False:
+            bubble["partial_view_enabled"] = False
+            changed = True
+        profile = data.setdefault("profile", {})
+        if profile.get("exit_type") != "Normal" or profile.get("exited_cleanly") is not True:
+            profile.update(exit_type="Normal", exited_cleanly=True)
+            changed = True
+        if changed:
             prefs.write_text(json.dumps(data), encoding="utf-8")
     except Exception:
         pass
@@ -635,19 +649,77 @@ def list_docs() -> list[dict]:
     page = _context().new_page()
     out: dict[str, dict] = {}
     try:
-        for n in range(1, 11):
-            page.goto(f"{HANDSHAKE_BASE}/docs?page={n}", wait_until="domcontentloaded")
-            _pause(3, 4)
-            if (b := _blocker(page)):
-                raise RuntimeError(b)
+        # The list pages in the browser (25 per page); a ?page= address is ignored, so use its
+        # own "next page" button until it stops adding rows.
+        page.goto(f"{HANDSHAKE_BASE}/docs", wait_until="domcontentloaded")
+        _pause(3, 4)
+        if (b := _blocker(page)):
+            raise RuntimeError(b)
+        for _ in range(20):
             rows = page.evaluate(LIST_DOCS_JS)
             fresh = [r for r in rows if r["id"] not in out]
-            if not fresh:
-                break
             out.update({r["id"]: r for r in fresh})
+            nxt = page.locator('button[aria-label="next page"]')
+            if not fresh or not nxt.count() or nxt.first.is_disabled():
+                break
+            nxt.first.click()
+            _pause(2, 3)
     finally:
         page.close()
     return list(out.values())
+
+
+OPTIMIZER = f"{HANDSHAKE_BASE}/sidekick/resume-builder/start"
+_DOWNLOAD_RX = re.compile(r"^\s*Download\s*$")
+_OPTIMIZE_RX = re.compile(r"optimize my resume", re.I)
+
+
+def optimize_resume(out_dir: Path, doc_id: str = "", pdf: Path | None = None,
+                    upload_name: str | None = None, wait: float = 240) -> dict:
+    """Run Handshake's resume optimizer (Jobs toolkit > Strengthen your resume) on one of your
+    Handshake documents, or on a PDF uploaded there, and download its improved draft.
+    Nothing is saved on Handshake. Returns {"docx": Path, "pdf": Path, "doc_id": str}."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    page = _context().new_page()
+    try:
+        page.goto(OPTIMIZER, wait_until="domcontentloaded")
+        page.locator("button", has_text=_OPTIMIZE_RX).first.wait_for(timeout=30000)
+        if (b := _blocker(page)):
+            raise RuntimeError(b)
+        select = page.locator("select").first
+        if doc_id and select.locator(f'option[value="{doc_id}"]').count():
+            select.select_option(doc_id)
+        elif pdf:
+            before = select.input_value() if select.count() else ""
+            page.locator("input[type=file]").first.set_input_files(str(_upload_copy(Path(pdf), upload_name)))
+            deadline = time.time() + 90  # Handshake adds the upload to the list and selects it
+            while time.time() < deadline and "resume-builder/chat" not in page.url:
+                if select.count() and select.input_value() not in ("", before):
+                    break
+                time.sleep(1.5)
+            doc_id = select.input_value() if select.count() and "resume-builder/chat" not in page.url else ""
+        else:
+            raise RuntimeError("That resume isn't in your Handshake documents.")
+        if "resume-builder/chat" not in page.url:
+            _pause(1, 2)
+            page.locator("button", has_text=_OPTIMIZE_RX).first.click()
+        button = page.locator("button:visible").filter(has_text=_DOWNLOAD_RX).last
+        button.wait_for(timeout=wait * 1000)
+        out = {"doc_id": doc_id}
+        for label, ext in (("Download as DOCX", "docx"), ("Download as PDF", "pdf")):
+            page.keyboard.press("Escape")
+            _pause(0.5, 1)
+            button.click()
+            item = page.locator("[role=menuitem]:visible", has_text=label).first
+            item.wait_for(timeout=15000)
+            with page.expect_download(timeout=90000) as dl:
+                item.click()
+            path = out_dir / f"handshake_draft.{ext}"
+            dl.value.save_as(str(path))
+            out[ext] = path
+        return out
+    finally:
+        page.close()
 
 
 def delete_doc(doc_id: str) -> bool:

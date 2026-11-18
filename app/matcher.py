@@ -175,7 +175,10 @@ def tailored_block(copies: list[dict]) -> str:
     out = []
     for c in copies:
         lines = [f'<tailored_copy key="{c["key"]}" base="{c["slot"]}" branch="{c["branch"]}"{_record(c.get("record"))}>']
-        lines += [f"- replaces: {e['old']}\n  with: {e['new']}" for e in c.get("edits", [])]
+        if c.get("text"):  # rewritten as a whole (Handshake's optimizer): the full resume
+            lines.append(c["text"])
+        else:
+            lines += [f"- replaces: {e['old']}\n  with: {e['new']}" for e in c.get("edits", [])]
         if c.get("added"):
             lines.append(f"- adds project: {c['added']['title']}: {c['added']['text']}")
         lines.append("</tailored_copy>")

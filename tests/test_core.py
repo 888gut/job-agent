@@ -726,6 +726,69 @@ def test_handshake_docs_are_reused_and_old_unsent_copies_cleaned(monkeypatch, tm
         assert s.get(HandshakeDoc, "d-old").deleted and not s.get(HandshakeDoc, "d-old-sent").deleted
 
 
+def test_handshake_optimizer_replaces_unsent_branch_docs_and_versions_sent_ones(monkeypatch, tmp_path, full_pdf):
+    import pymupdf
+
+    from app import google_store, pipeline
+    from app.db import Application, Job, Resume, TailoredResume, init_db, session
+
+    init_db()
+    with session() as s:
+        r = Resume(slot="A", filename="a.pdf", path=str(full_pdf), text="resume a")
+        s.add(r)
+        s.commit()
+        s.refresh(r)
+        unsent = TailoredResume(resume_id=r.id, slot="A", branch="Logistics", doc_id="doc-u", doc_url="u/doc-u")
+        sent = TailoredResume(resume_id=r.id, slot="A", branch="Finance", doc_id="doc-s", doc_url="u/doc-s", uses=1)
+        s.add(unsent)
+        s.add(sent)
+        s.commit()
+        s.refresh(unsent)
+        s.refresh(sent)
+        s.add(Job(handshake_id="j", url="", title="t", company="c", status="applied", tailored_id=sent.id))
+        s.add(Application(job_id=1, resume_slot="A", tailored=True, drive_url="u/doc-s"))
+        s.commit()
+
+    draft = tmp_path / "draft.pdf"
+    d = pymupdf.open()
+    page = d.new_page()
+    for i in range(12):
+        page.insert_text((72, 72 + 14 * i), "Improved resume text, line %d" % i)
+    d.save(str(draft))
+    uploaded, trashed, built, ran = [], [], [], []
+
+    def fake_build(tr_id):
+        built.append(tr_id)
+        with session() as s:
+            row = s.get(TailoredResume, tr_id)
+            row.pdf_path = str(full_pdf)
+            s.add(row)
+            s.commit()
+            return row
+
+    monkeypatch.setattr(pipeline, "build_doc", fake_build)
+    monkeypatch.setattr(pipeline, "_hs", lambda fn, *a, **k: ran.append(a) or {"docx": tmp_path / "d.docx", "pdf": draft, "doc_id": "hs-9"})
+    monkeypatch.setattr(google_store, "is_connected", lambda acct: True)
+    monkeypatch.setattr(google_store, "upload_as_doc", lambda path, name: uploaded.append(name) or f"new-{len(uploaded)}")
+    monkeypatch.setattr(google_store, "doc_url", lambda i: f"u/{i}")
+    monkeypatch.setattr(google_store, "trash_file", lambda i: trashed.append(i))
+
+    res = pipeline.optimize_branches()
+    assert res["ok"] and len(res["done"]) == 2 and len(ran) == 2
+    with session() as s:
+        u = s.get(TailoredResume, unsent.id)
+        old = s.get(TailoredResume, sent.id)
+        new = s.get(TailoredResume, old.superseded_by)
+    assert u.doc_id.startswith("new-") and u.hs_optimized_at and "Improved resume" in u.full_text
+    assert trashed == ["doc-u"]                                   # unsent: old Doc replaced (to Drive's trash)
+    assert old.doc_id == "doc-s" and new.branch == "Finance"      # sent: kept as the record, new version made
+    assert new.doc_id.startswith("new-") and new.superseded_by is None
+    assert {t.id for t in pipeline.branch_heads()} == {u.id, new.id}
+    assert pipeline.find_branch_resume(r.id, "Finance").id == new.id
+    assert all(c["id"] != old.id for c in pipeline.tailored_candidates())
+    assert pipeline.optimize_branches()["done"] == []             # weekly: not again within 7 days
+
+
 def test_dashboard_only_answers_local_requests():
     from fastapi.testclient import TestClient
 
